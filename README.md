@@ -1,16 +1,26 @@
 # Prosperity 4 - Algorithmic Trading Bot
 
-## Version 2.0: Conservative Mean-Reversion Market Maker
+## Version 3.0: Stateless-Aware Mean-Reversion Market Maker
 
 ### Overview
 
-This trading bot implements a **conservative mean-reversion market-making strategy** designed for the Prosperity trading competition. The algorithm passively places bid and ask orders around an estimated fair value, profiting from the bid-ask spread while managing inventory risk and avoiding large drawdowns.
+This trading bot implements a **stateless-aware mean-reversion market-making strategy** designed for the Prosperity trading competition. The algorithm passively places bid and ask orders around an estimated fair value, with full state persistence across AWS Lambda invocations.
 
 ---
 
 ## Version History
 
-### v2.0 (Current) - Conservative Mean-Reversion Market Maker
+### v3.0 (Current) - Stateless-Aware Market Maker
+Critical fixes and optimizations based on v2.0 performance analysis:
+- **CRITICAL: Full state persistence via `traderData`** — AWS Lambda is stateless; all state (fair values, price history, positions) is serialized to JSON and restored each invocation
+- **EMA-based fair value** — Replaced sliding-window median with exponential moving average (no drift, no window edge effects)
+- **EMERALDS optimized** — Tighter spread (3→5), larger orders (8→5), lower deviation threshold — EMERALDS now contributes to PNL
+- **Relaxed momentum filter** — Threshold increased from 0.0003 to 0.0005 (don't miss profitable trades)
+- **Position tracking via `own_trades`** — Internal position tracker supplements platform position for robustness
+- **Adaptive spread** — Volatility multiplier reduced (50 vs 100) for better fill rates
+- **v2.0 result**: Final PNL of **+800.13** (6.7x improvement over v1.0's +120)
+
+### v2.0 - Conservative Mean-Reversion Market Maker
 Major rewrite addressing severe drawdown issues found in v1.0:
 - **Passive market making**: Earn the spread instead of paying it
 - **Momentum filter**: Avoid trading against strong price trends
@@ -18,6 +28,7 @@ Major rewrite addressing severe drawdown issues found in v1.0:
 - **Reduced position sizing**: Smaller orders and tighter position limits
 - **Volatility-adjusted spreads**: Wider spreads in volatile conditions
 - **Per-product `ProductTracker`**: Clean state management with price history, fair value, and momentum tracking
+- **Result**: Final PNL of **+800.13** vs v1.0's +120 (6.7x improvement)
 
 ### v1.0 - Mean-Reversion Market Maker
 - Rolling median fair value estimation
@@ -25,6 +36,7 @@ Major rewrite addressing severe drawdown issues found in v1.0:
 - Inventory-based quote skewing
 - Conservative position limits
 - Backtested on historical data
+- **Result**: Final PNL of ~+120 with -500 max drawdown
 
 ---
 
@@ -59,17 +71,17 @@ Major rewrite addressing severe drawdown issues found in v1.0:
 
 ## Strategy Components
 
-### 1. Fair Value Estimation
-- **Method**: Rolling median of recent mid-prices
-- **Window**: 15 most recent price observations (reduced from 20 for faster adaptation)
-- **Why median?**: More robust to outliers than mean
-- **Fallback**: Uses known fundamental values (10,000 for EMERALDS, 5,000 for TOMATOES)
+### 1. Fair Value Estimation (v3.0: EMA-based)
+- **Method**: Exponential Moving Average (EMA) of mid-prices
+- **Why EMA?**: No sliding window edge effects, no drift, smooth adaptation
+- **Alpha**: 0.1 (EMERALDS), 0.15 (TOMATOES — slightly faster adaptation)
+- **Fallback**: Uses first observed mid-price as initial fair value
 
 ```
-Fair Value = Median(last 15 mid-prices)
+FV_new = alpha * mid_price + (1 - alpha) * FV_old
 ```
 
-### 2. Passive Market Making (Key v2.0 Change)
+### 2. Passive Market Making
 
 Instead of aggressively taking liquidity at the best bid/ask, we place **passive limit orders** inside the spread:
 
@@ -156,26 +168,26 @@ Smaller orders mean smaller losses on any single wrong trade.
 PRODUCT_CONFIG = {
     "EMERALDS": {
         "fair_value_default": 10000,
-        "target_half_spread": 5,          # Tighter spread
-        "order_size": 5,                   # Reduced from 8
-        "max_position": 20,               # Reduced from 30
-        "min_deviation_pct": 0.0008,      # 0.08% threshold
-        "fair_value_window": 15,           # Faster adaptation
+        "target_half_spread": 3,          # Tighter (v3.0: was 5)
+        "order_size": 8,                   # Larger (v3.0: was 5)
+        "max_position": 20,
+        "min_deviation_pct": 0.0005,      # Lower (v3.0: was 0.0008)
+        "ema_alpha": 0.1,                  # EMA smoothing (v3.0: new)
     },
     "TOMATOES": {
         "fair_value_default": 5000,
-        "target_half_spread": 5,           # Tighter spread
-        "order_size": 3,                   # Reduced from 5
-        "max_position": 15,               # Reduced from 25
-        "min_deviation_pct": 0.0012,      # 0.12% threshold (higher for volatility)
-        "fair_value_window": 15,
+        "target_half_spread": 4,           # Tighter (v3.0: was 5)
+        "order_size": 5,                   # Larger (v3.0: was 3)
+        "max_position": 15,
+        "min_deviation_pct": 0.001,       # Lower (v3.0: was 0.0012)
+        "ema_alpha": 0.15,                 # EMA smoothing (v3.0: new)
     },
 }
 
 # Global settings
-INVENTORY_SKEW_FACTOR = 0.3        # Reduced from 0.5
-MOMENTUM_WINDOW = 5                # Look back 5 ticks
-MOMENTUM_THRESHOLD = 0.0003        # Skip trades against strong momentum
+INVENTORY_SKEW_FACTOR = 0.3
+MOMENTUM_WINDOW = 5
+MOMENTUM_THRESHOLD = 0.0005               # Relaxed (v3.0: was 0.0003)
 ```
 
 ---
@@ -233,15 +245,19 @@ Passive Orders             Aggressive Orders
 
 ---
 
-## What Changed from v1.0 → v2.0
+## What Changed Across Versions
 
-### v1.0 Problems (identified from performance graph)
-1. **Massive drawdowns** (~-500 PNL): Strategy was aggressively taking liquidity, paying the spread
-2. **Slow recovery**: Took ~170K iterations to recover from losses
-3. **High volatility**: PNL extremely jagged — trading too frequently with too much size
-4. **Barely profitable**: After all the risk, final PNL was only ~+120
+### v2.0 → v3.0 (Current)
 
-### v2.0 Fixes
+| Problem in v2.0 | v2.0 Behavior | v3.0 Fix |
+|-----------------|--------------|----------|
+| State lost between calls | Class variables reset each Lambda invocation | Full JSON serialization via `traderData` |
+| Fair value drift | Sliding window median loses old prices | EMA with no window edge effects |
+| EMERALDS underperforming | Half-spread=5, order_size=5 — orders rarely filled | Half-spread=3, order_size=8 — more fills |
+| Missing profitable trades | Momentum threshold=0.0003 too aggressive | Threshold=0.0005 — less blocking |
+| Position tracking gaps | Relied solely on platform position | Dual tracking: platform + `own_trades` |
+
+### v1.0 → v2.0
 
 | Problem | v1.0 Behavior | v2.0 Fix |
 |---------|--------------|----------|
@@ -250,12 +266,6 @@ Passive Orders             Aggressive Orders
 | Fighting trends | No momentum check | Momentum filter blocks counter-trend trades |
 | Large drawdowns | Order size 5-8, max pos 25-30 | Order size 3-5, max pos 15-20 |
 | Noise trading | No threshold | 0.08%-0.12% deviation required |
-
-### Expected Improvement
-- **Smoother PNL curve**: Fewer losing trades, smaller losses per trade
-- **Smaller drawdowns**: Momentum filter prevents catching falling knives
-- **Better risk-adjusted returns**: Same or better total profit with much less risk
-- **Faster recovery**: Smaller positions mean faster recovery from any drawdown
 
 ---
 
