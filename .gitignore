@@ -10,11 +10,6 @@ __pycache__/
 *.log
 *.json
 
-# Screenshots
-*.png
-*.jpg
-*.jpeg
-
 # IDE
 .vscode/
 .idea/
