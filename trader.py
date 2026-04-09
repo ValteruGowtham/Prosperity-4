@@ -1,13 +1,14 @@
 """
-Prosperity 4 - Algorithmic Trading Bot v4.0
-Strategy: Aggressive Mean-Reversion Market Maker
+Prosperity 4 - Algorithmic Trading Bot v3.0
+Strategy: Conservative Mean-Reversion Market Maker
 
-v4.0 Improvements over v3.0:
-- EMERALDS optimized for maximum turnover (tighter spread, larger orders)
-- Position recycling: actively seek to trade even when flat
-- Adaptive spread: tighten when no fills, widen when getting filled
-- Dual-mode trading: passive + opportunistic aggressive orders
-- Better fill rate tracking via traderData
+v3.0 Improvements over v2.0:
+- CRITICAL: Full state persistence via traderData (AWS Lambda is stateless)
+- EMERALDS optimized: tighter spread, larger orders for more fills
+- EMA-based fair value (no drift from sliding window)
+- Relaxed momentum threshold (don't miss profitable trades)
+- Position tracking via own_trades + platform position
+- Adaptive spread based on fill rate
 """
 
 import json
@@ -82,39 +83,33 @@ class TradingState:
 
 
 # ============================================================
-# Product Configuration (v4.0 optimized)
+# Product Configuration (v3.0 tuned)
 # ============================================================
 PRODUCT_CONFIG = {
     "EMERALDS": {
         "fair_value_default": 10000,
-        "target_half_spread": 2,       # v4.0: was 3 → 2 (ultra-tight for max fills)
-        "order_size": 12,              # v4.0: was 8 → 12 (bigger for faster turnover)
+        "target_half_spread": 3,       # Tighter: was 5 → 3 (more fills)
+        "order_size": 8,               # Larger: was 5 → 8 (EMERALDS is stable)
         "max_position": 20,
-        "min_deviation_pct": 0.0003,   # v4.0: was 0.0005 → 0.0003 (more aggressive)
-        "ema_alpha": 0.1,
+        "min_deviation_pct": 0.0005,   # Lower threshold: was 0.0008
+        "ema_alpha": 0.1,              # EMA smoothing factor
         "volatility_lookback": 10,
-        # v4.0: EMERALDS-specific aggressive mode
-        "aggressive_half_spread": 1,   # When flat, use even tighter spread
-        "aggressive_order_size": 15,   # When flat, place bigger orders
     },
     "TOMATOES": {
         "fair_value_default": 5000,
-        "target_half_spread": 3,       # v4.0: was 4 → 3 (slightly tighter)
-        "order_size": 6,               # v4.0: was 5 → 6 (slightly bigger)
+        "target_half_spread": 4,       # Slightly tighter: was 5 → 4
+        "order_size": 5,               # Larger: was 3 → 5
         "max_position": 15,
-        "min_deviation_pct": 0.0008,   # v4.0: was 0.001 → 0.0008 (more aggressive)
-        "ema_alpha": 0.15,
+        "min_deviation_pct": 0.001,    # Lower threshold: was 0.0012
+        "ema_alpha": 0.15,             # Slightly faster adaptation
         "volatility_lookback": 10,
-        "aggressive_half_spread": 2,
-        "aggressive_order_size": 8,
     },
 }
 
 # Global settings
-INVENTORY_SKEW_FACTOR = 0.25           # v4.0: was 0.3 → 0.25 (less skew = more fills)
+INVENTORY_SKEW_FACTOR = 0.3
 MOMENTUM_WINDOW = 5
-MOMENTUM_THRESHOLD = 0.0008            # v4.0: was 0.0005 → 0.0008 (even more relaxed)
-FILL_TRACK_WINDOW = 20                 # Track fills over last 20 iterations
+MOMENTUM_THRESHOLD = 0.0005    # Relaxed: was 0.0003 (don't block profitable trades)
 
 
 # ============================================================
@@ -124,14 +119,17 @@ class SerializableState:
     """All state that must persist across Lambda invocations."""
 
     def __init__(self):
+        # EMA-based fair value per product
         self.fair_value: Dict[str, float] = {}
+        # Price history for momentum calculation (last N mid prices)
         self.price_history: Dict[str, List[int]] = {}
+        # Internal position tracker (backup for platform position)
         self.internal_position: Dict[str, int] = {}
+        # Last known timestamp (for detecting resets)
         self.last_timestamp: int = 0
-        # v4.0: Fill tracking for adaptive spread
-        self.recent_fills: Dict[str, List[bool]] = {}  # True if filled in last N iterations
-        self.iteration_count: Dict[str, int] = {}  # Total iterations per product
-        self.fills_in_window: Dict[str, int] = {}  # Fills in recent window
+        # Fill tracking: how many orders placed vs filled
+        self.orders_placed: Dict[str, int] = {}
+        self.orders_filled: Dict[str, int] = {}
 
     def to_dict(self) -> dict:
         return {
@@ -139,9 +137,8 @@ class SerializableState:
             "price_history": self.price_history,
             "internal_position": self.internal_position,
             "last_timestamp": self.last_timestamp,
-            "recent_fills": self.recent_fills,
-            "iteration_count": self.iteration_count,
-            "fills_in_window": self.fills_in_window,
+            "orders_placed": self.orders_placed,
+            "orders_filled": self.orders_filled,
         }
 
     @staticmethod
@@ -151,9 +148,8 @@ class SerializableState:
         state.price_history = data.get("price_history", {})
         state.internal_position = data.get("internal_position", {})
         state.last_timestamp = data.get("last_timestamp", 0)
-        state.recent_fills = data.get("recent_fills", {})
-        state.iteration_count = data.get("iteration_count", {})
-        state.fills_in_window = data.get("fills_in_window", {})
+        state.orders_placed = data.get("orders_placed", {})
+        state.orders_filled = data.get("orders_filled", {})
         return state
 
     def serialize(self) -> str:
@@ -170,7 +166,7 @@ class SerializableState:
 
 
 # ============================================================
-# Trader Class (v4.0)
+# Trader Class (v3.0)
 # ============================================================
 class Trader:
     def __init__(self):
@@ -183,19 +179,21 @@ class Trader:
     def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], int, str]:
         """Main trading method called by the platform each iteration."""
 
-        # === Restore state from traderData ===
+        # === CRITICAL: Restore state from traderData ===
+        # AWS Lambda is stateless — class variables don't persist between calls!
         if not self._initialized:
             self.state = SerializableState.deserialize(state.traderData)
             self._initialized = True
 
-        # Detect reset
+        # Detect if we've been reset (timestamp went backwards)
         if state.timestamp < self.state.last_timestamp:
+            # Keep fair_value and positions but reset short-term history
             self.state.price_history = {}
 
         result: Dict[str, List[Order]] = {}
 
         # === Update positions from own_trades ===
-        had_fills = self._update_positions(state)
+        self._update_positions(state)
 
         # === Process each product ===
         for product in state.order_depths:
@@ -205,7 +203,7 @@ class Trader:
             config = PRODUCT_CONFIG[product]
             order_depth: OrderDepth = state.order_depths[product]
 
-            # Get position
+            # Get current position (prefer platform's, fallback to internal)
             current_position = state.position.get(product, self.state.internal_position.get(product, 0))
 
             # Calculate mid price
@@ -220,11 +218,8 @@ class Trader:
             # Calculate momentum
             momentum = self._calculate_momentum(product, mid_price)
 
-            # Track fills for adaptive spread
-            self._track_fills(product, had_fills.get(product, False))
-
-            # Generate orders with adaptive spread
-            orders = self._calculate_orders_v4(
+            # Generate orders
+            orders = self._calculate_orders(
                 product=product,
                 config=config,
                 order_depth=order_depth,
@@ -236,34 +231,29 @@ class Trader:
 
             result[product] = orders
 
-        # === Save state ===
+        # === Save state for next invocation ===
         self.state.last_timestamp = state.timestamp
         trader_data = self.state.serialize()
         conversions = 0
 
         return result, conversions, trader_data
 
-    def _update_positions(self, state: TradingState) -> Dict[str, bool]:
-        """Update internal position tracker from own_trades. Returns dict of which products had fills."""
-        had_fills: Dict[str, bool] = {}
+    def _update_positions(self, state: TradingState):
+        """Update internal position tracker from own_trades."""
         for product, trades in state.own_trades.items():
             if product not in self.state.internal_position:
                 self.state.internal_position[product] = 0
-                had_fills[product] = False
 
-            if trades:
-                had_fills[product] = True
-                for trade in trades:
-                    if trade.buyer == "SUBMISSION":
-                        self.state.internal_position[product] += trade.quantity
-                    elif trade.seller == "SUBMISSION":
-                        self.state.internal_position[product] -= trade.quantity
-            else:
-                had_fills[product] = False
-
-        return had_fills
+            for trade in trades:
+                if trade.buyer == "SUBMISSION":
+                    # We bought → position increases
+                    self.state.internal_position[product] += trade.quantity
+                elif trade.seller == "SUBMISSION":
+                    # We sold → position decreases
+                    self.state.internal_position[product] -= trade.quantity
 
     def _get_mid_price(self, order_depth: OrderDepth) -> Optional[int]:
+        """Calculate mid price from order book."""
         if order_depth.buy_orders and order_depth.sell_orders:
             best_bid = max(order_depth.buy_orders.keys())
             best_ask = min(order_depth.sell_orders.keys())
@@ -271,62 +261,46 @@ class Trader:
         return None
 
     def _update_fair_value(self, product: str, mid_price: int, config: dict) -> float:
+        """Update EMA-based fair value. No drift, no window size issues."""
         alpha = config["ema_alpha"]
+
         if product not in self.state.fair_value:
             self.state.fair_value[product] = float(mid_price)
             return self.state.fair_value[product]
+
+        # EMA formula: FV_new = alpha * price + (1 - alpha) * FV_old
         old_fv = self.state.fair_value[product]
         new_fv = alpha * mid_price + (1 - alpha) * old_fv
         self.state.fair_value[product] = new_fv
+
         return new_fv
 
     def _calculate_momentum(self, product: str, mid_price: int) -> float:
+        """Calculate momentum from recent price history."""
         if product not in self.state.price_history:
             self.state.price_history[product] = []
+
         history = self.state.price_history[product]
         history.append(mid_price)
+
+        # Keep last N prices
         if len(history) > MOMENTUM_WINDOW:
             self.state.price_history[product] = history[-MOMENTUM_WINDOW:]
             history = self.state.price_history[product]
+
         if len(history) < 3:
             return 0.0
+
         half = len(history) // 2
         first_avg = sum(history[:half]) / half
         second_avg = sum(history[half:]) / (len(history) - half)
+
         if first_avg == 0:
             return 0.0
+
         return (second_avg - first_avg) / first_avg
 
-    def _track_fills(self, product: str, had_fill: bool):
-        """Track recent fills for adaptive spread adjustment."""
-        if product not in self.state.recent_fills:
-            self.state.recent_fills[product] = []
-            self.state.iteration_count[product] = 0
-            self.state.fills_in_window[product] = 0
-
-        history = self.state.recent_fills[product]
-        history.append(had_fill)
-        self.state.iteration_count[product] = self.state.iteration_count.get(product, 0) + 1
-
-        # Keep only last N
-        if len(history) > FILL_TRACK_WINDOW:
-            old_fill = history.pop(0)
-            if old_fill:
-                self.state.fills_in_window[product] = max(0, self.state.fills_in_window[product] - 1)
-
-        if had_fill:
-            self.state.fills_in_window[product] = self.state.fills_in_window.get(product, 0) + 1
-
-    def _get_fill_rate(self, product: str) -> float:
-        """Get recent fill rate (0.0 to 1.0)."""
-        count = self.state.iteration_count.get(product, 0)
-        if count == 0:
-            return 0.0
-        fills = self.state.fills_in_window.get(product, 0)
-        window_size = min(FILL_TRACK_WINDOW, count)
-        return fills / window_size if window_size > 0 else 0.0
-
-    def _calculate_orders_v4(
+    def _calculate_orders(
         self,
         product: str,
         config: dict,
@@ -336,30 +310,18 @@ class Trader:
         current_position: int,
         momentum: float,
     ) -> List[Order]:
-        """v4.0: Calculate orders with adaptive spread and position recycling."""
+        """Calculate orders based on market conditions."""
         orders: List[Order] = []
         max_position = config["max_position"]
-        base_half_spread = config["target_half_spread"]
         order_size = config["order_size"]
+        base_half_spread = config["target_half_spread"]
 
-        # === v4.0: Adaptive spread based on fill rate ===
-        fill_rate = self._get_fill_rate(product)
-
-        if fill_rate < 0.1 and abs(current_position) < max_position * 0.5:
-            # Low fill rate + not at position limit → get aggressive
-            half_spread = config.get("aggressive_half_spread", base_half_spread)
-            order_size = config.get("aggressive_order_size", order_size)
-        elif fill_rate > 0.6:
-            # High fill rate → can widen slightly to earn more spread
-            half_spread = base_half_spread + 1
-        else:
-            half_spread = base_half_spread
-
-        # === Deviation and momentum ===
+        # === Deviation check ===
         deviation = (fair_value - mid_price) / fair_value if fair_value > 0 else 0
         abs_deviation = abs(deviation)
         min_dev = config["min_deviation_pct"]
 
+        # === Momentum filter (relaxed in v3.0) ===
         should_trade_aggressive = True
         if abs(momentum) > MOMENTUM_THRESHOLD:
             if deviation > 0 and momentum < -MOMENTUM_THRESHOLD:
@@ -374,13 +336,13 @@ class Trader:
             inventory_ratio = 0
 
         # === Volatility adjustment ===
-        vol_multiplier = 1.0 + (abs_deviation * 30)  # v4.0: reduced from 50
-        adjusted_spread = half_spread * vol_multiplier
+        vol_multiplier = 1.0 + (abs_deviation * 50)  # Reduced from 100
+        adjusted_spread = base_half_spread * vol_multiplier
 
-        # === Skew ===
+        # === Skew calculation ===
         skew = inventory_ratio * INVENTORY_SKEW_FACTOR * adjusted_spread
 
-        # === Passive orders ===
+        # === Passive orders (always placed) ===
         our_bid = int(fair_value - adjusted_spread + skew)
         our_ask = int(fair_value + adjusted_spread + skew)
 
@@ -397,44 +359,28 @@ class Trader:
             our_bid = min(our_bid, best_ask - 1)
             our_ask = max(our_ask, best_bid + 1)
 
-            # === v4.0: Aggressive orders when conditions are right ===
+            # === Aggressive orders when deviation is significant ===
             if abs_deviation >= min_dev and should_trade_aggressive:
                 if deviation > 0:
-                    aggressive_bid = int(fair_value - adjusted_spread * 0.2 + skew)
+                    # Price below fair value — bid more aggressively
+                    aggressive_bid = int(fair_value - adjusted_spread * 0.3 + skew)
                     our_bid = max(our_bid, min(aggressive_bid, best_ask - 1))
                 elif deviation < 0:
-                    aggressive_ask = int(fair_value + adjusted_spread * 0.2 + skew)
+                    # Price above fair value — ask more aggressively
+                    aggressive_ask = int(fair_value + adjusted_spread * 0.3 + skew)
                     our_ask = min(our_ask, max(aggressive_ask, best_bid + 1))
-
-            # === v4.0: Position recycling — when flat, be aggressive on ONE side ===
-            if abs(current_position) < 3 and fill_rate < 0.2:
-                # We're nearly flat and not getting fills
-                if deviation > 0.0001:
-                    # Price below fair value → aggressive BUY
-                    our_bid = max(our_bid, best_ask - 1)
-                elif deviation < -0.0001:
-                    # Price above fair value → aggressive SELL
-                    our_ask = min(our_ask, best_bid + 1)
-                else:
-                    # Price at fair value → slightly aggressive on both sides
-                    our_bid = max(our_bid, best_bid + 1)
-                    our_ask = min(our_ask, best_ask - 1)
-
-        # === Safety: ensure bid < ask (no crossed orders) ===
-        if our_bid >= our_ask:
-            midpoint = (our_bid + our_ask) // 2
-            our_bid = midpoint - 1
-            our_ask = midpoint + 1
 
         # === Place orders ===
         if current_position < max_position:
             buy_qty = min(order_size, max_position - current_position)
             if buy_qty > 0:
                 orders.append(Order(product, our_bid, buy_qty))
+                self.state.orders_placed[product] = self.state.orders_placed.get(product, 0) + 1
 
         if current_position > -max_position:
             sell_qty = min(order_size, max_position + current_position)
             if sell_qty > 0:
                 orders.append(Order(product, our_ask, -sell_qty))
+                self.state.orders_placed[product] = self.state.orders_placed.get(product, 0) + 1
 
         return orders
