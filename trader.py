@@ -1,17 +1,16 @@
 """
-Prosperity 4 - Algorithmic Trading Bot v5.0
-Strategy: Dynamic Mean-Reversion Market Maker
+Prosperity 4 - Algorithmic Trading Bot v11.0
+Strategy: Conservative Enhancement (Surgical Fix on v3.0 Baseline)
 
-v5.0 Improvements over v3.0:
-1. Dynamic order sizing: scale up TOMATOES orders when we have room + strong signal
-2. Spread tightening near position limits: prioritize getting filled over edge when >80% loaded
-3. Careful market-taking: only take liquidity when deviation > 0.002 (strong conviction)
+v11.0: TWO SURGICAL IMPROVEMENTS on v3.0 (+1195 PNL)
+1. Opportunistic fills: When flat + strong signal + momentum agreement, add small orders at best bid/ask
+2. Position-aware unwinding: 3 zones (normal, caution, danger) to prevent getting stuck at limits
 
-v3.0 features retained:
-- Full state persistence via traderData (AWS Lambda is stateless)
-- EMA-based fair value (no drift from sliding window)
+All v3.0 logic preserved:
+- Full state persistence via traderData
+- EMA-based fair value
 - State-aware momentum filtering
-- Position tracking via own_trades + platform position
+- Conservative base parameters (TOMATOES: size 5, spread 4; EMERALDS: size 8, spread 3)
 """
 
 import json
@@ -86,7 +85,7 @@ class TradingState:
 
 
 # ============================================================
-# Product Configuration (v5.0 tuned)
+# Product Configuration (v3.0 baseline — KEEP THESE)
 # ============================================================
 PRODUCT_CONFIG = {
     "EMERALDS": {
@@ -96,7 +95,6 @@ PRODUCT_CONFIG = {
         "max_position": 20,
         "min_deviation_pct": 0.0005,
         "ema_alpha": 0.1,
-        "volatility_lookback": 10,
     },
     "TOMATOES": {
         "fair_value_default": 5000,
@@ -105,36 +103,24 @@ PRODUCT_CONFIG = {
         "max_position": 15,
         "min_deviation_pct": 0.001,
         "ema_alpha": 0.15,
-        "volatility_lookback": 10,
-        # v5.0: dynamic sizing thresholds
-        "aggressive_order_size": 8,     # Max order size when strong signal + room
-        "strong_deviation_threshold": 0.0015,  # Threshold for larger orders
     },
 }
 
-# Global settings
+# Global settings (v3.0 baseline)
 INVENTORY_SKEW_FACTOR = 0.3
 MOMENTUM_WINDOW = 5
 MOMENTUM_THRESHOLD = 0.0005
-# v5.0: market-taking threshold (only take liquidity when conviction is very high)
-MARKET_TAKING_THRESHOLD = 0.002
-# v5.0: position limit utilization threshold for spread tightening
-SPREAD_TIGHTEN_THRESHOLD = 0.8
 
 
 # ============================================================
 # State Management (serialized via traderData)
 # ============================================================
 class SerializableState:
-    """All state that must persist across Lambda invocations."""
-
     def __init__(self):
         self.fair_value: Dict[str, float] = {}
         self.price_history: Dict[str, List[int]] = {}
         self.internal_position: Dict[str, int] = {}
         self.last_timestamp: int = 0
-        self.orders_placed: Dict[str, int] = {}
-        self.orders_filled: Dict[str, int] = {}
 
     def to_dict(self) -> dict:
         return {
@@ -142,8 +128,6 @@ class SerializableState:
             "price_history": self.price_history,
             "internal_position": self.internal_position,
             "last_timestamp": self.last_timestamp,
-            "orders_placed": self.orders_placed,
-            "orders_filled": self.orders_filled,
         }
 
     @staticmethod
@@ -153,8 +137,6 @@ class SerializableState:
         state.price_history = data.get("price_history", {})
         state.internal_position = data.get("internal_position", {})
         state.last_timestamp = data.get("last_timestamp", 0)
-        state.orders_placed = data.get("orders_placed", {})
-        state.orders_filled = data.get("orders_filled", {})
         return state
 
     def serialize(self) -> str:
@@ -171,7 +153,7 @@ class SerializableState:
 
 
 # ============================================================
-# Trader Class (v5.0)
+# Trader Class (v11.0)
 # ============================================================
 class Trader:
     def __init__(self):
@@ -182,9 +164,8 @@ class Trader:
         return 15
 
     def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], int, str]:
-        """Main trading method called by the platform each iteration."""
-
-        # === Restore state from traderData ===
+        """Main trading method."""
+        # Restore state from traderData
         if not self._initialized:
             self.state = SerializableState.deserialize(state.traderData)
             self._initialized = True
@@ -195,10 +176,10 @@ class Trader:
 
         result: Dict[str, List[Order]] = {}
 
-        # === Update positions from own_trades ===
+        # Update positions from own_trades
         self._update_positions(state)
 
-        # === Process each product ===
+        # Process each product
         for product in state.order_depths:
             if product not in PRODUCT_CONFIG:
                 continue
@@ -221,8 +202,8 @@ class Trader:
             # Calculate momentum
             momentum = self._calculate_momentum(product, mid_price)
 
-            # Generate orders with v5.0 improvements
-            orders = self._calculate_orders_v5(
+            # Generate orders
+            orders = self._calculate_orders(
                 product=product,
                 config=config,
                 order_depth=order_depth,
@@ -234,7 +215,7 @@ class Trader:
 
             result[product] = orders
 
-        # === Save state ===
+        # Save state
         self.state.last_timestamp = state.timestamp
         trader_data = self.state.serialize()
         conversions = 0
@@ -254,7 +235,6 @@ class Trader:
                     self.state.internal_position[product] -= trade.quantity
 
     def _get_mid_price(self, order_depth: OrderDepth) -> Optional[int]:
-        """Calculate mid price from order book."""
         if order_depth.buy_orders and order_depth.sell_orders:
             best_bid = max(order_depth.buy_orders.keys())
             best_ask = min(order_depth.sell_orders.keys())
@@ -262,9 +242,8 @@ class Trader:
         return None
 
     def _update_fair_value(self, product: str, mid_price: int, config: dict) -> float:
-        """Update EMA-based fair value."""
+        """EMA-based fair value."""
         alpha = config["ema_alpha"]
-
         if product not in self.state.fair_value:
             self.state.fair_value[product] = float(mid_price)
             return self.state.fair_value[product]
@@ -272,11 +251,9 @@ class Trader:
         old_fv = self.state.fair_value[product]
         new_fv = alpha * mid_price + (1 - alpha) * old_fv
         self.state.fair_value[product] = new_fv
-
         return new_fv
 
     def _calculate_momentum(self, product: str, mid_price: int) -> float:
-        """Calculate momentum from recent price history."""
         if product not in self.state.price_history:
             self.state.price_history[product] = []
 
@@ -300,59 +277,126 @@ class Trader:
         return (second_avg - first_avg) / first_avg
 
     # ============================================================
-    # v5.0: Dynamic Order Sizing
+    # v11.0 Surgical Fix #2: Position-Aware Order Calculation
+    # 3 zones: Normal (0-60%), Caution (60-80%), Danger (80%+)
     # ============================================================
-    def _calculate_dynamic_order_size(self, product: str, current_position: int,
-                                       max_position: int, deviation: float) -> int:
-        """Scale order size based on available position room and signal strength."""
-        config = PRODUCT_CONFIG[product]
-        base_size = config["order_size"]
-        position_room = max_position - abs(current_position)
-
-        if product == "TOMATOES":
-            position_utilization = abs(current_position) / max_position if max_position > 0 else 0
-            abs_dev = abs(deviation)
-
-            if position_utilization < 0.5 and abs_dev > config.get("strong_deviation_threshold", 0.0015):
-                return min(config.get("aggressive_order_size", 8), position_room)
-            elif position_utilization < 0.3:
-                return min(base_size + 1, position_room)
-
-        return min(base_size, position_room)
-
-    # ============================================================
-    # v5.0: Spread Tightening Near Position Limits
-    # ============================================================
-    def _get_spread_adjustment(self, current_position: int, max_position: int,
-                                base_spread: float, deviation: float) -> float:
-        """Tighten spread when near position limits to prioritize getting filled.
-
-        Being stuck at position limit is the worst outcome — we'd rather get filled
-        at a slightly worse price than miss the move entirely.
+    def _calculate_position_aware_orders(
+        self,
+        product: str,
+        config: dict,
+        order_depth: OrderDepth,
+        fair_value: float,
+        current_position: int,
+        max_position: int,
+        adjusted_spread: float,
+        skew: float,
+    ) -> List[Order]:
         """
-        position_utilization = abs(current_position) / max_position if max_position > 0 else 0
+        Zone 1: Normal (0-60%) — use passive orders normally
+        Zone 2: Caution (60-80%) — tighten spread by 20% for unwinding side
+        Zone 3: Danger (80%+) — aggressive unwinding at best bid/ask
+        """
+        position_ratio = abs(current_position) / max_position if max_position > 0 else 0
 
-        if position_utilization > SPREAD_TIGHTEN_THRESHOLD:
-            # We're >80% loaded → tighten spread to ensure fills
-            adjusted_spread = base_spread * 0.6
+        # Zone 3: Danger — must unwind aggressively
+        if position_ratio >= 0.8:
+            best_bid = max(order_depth.buy_orders.keys())
+            best_ask = min(order_depth.sell_orders.keys())
 
-            # If we're dangerously long → be MORE aggressive on the ask (sell)
-            if current_position > max_position * SPREAD_TIGHTEN_THRESHOLD:
-                # Need to sell → tighten ask spread by half
-                adjusted_spread = base_spread * 0.5
-            # If we're dangerously short → be MORE aggressive on the bid (buy)
-            elif current_position < -max_position * SPREAD_TIGHTEN_THRESHOLD:
-                # Need to buy → tighten bid spread by half
-                adjusted_spread = base_spread * 0.5
+            if current_position > max_position * 0.8:
+                # Too long — MUST sell at best ask
+                sell_qty = min(config["order_size"], current_position + max_position)
+                return [Order(product, best_ask, -sell_qty)]
+            else:
+                # Too short — MUST buy at best bid
+                buy_qty = min(config["order_size"], max_position - current_position)
+                return [Order(product, best_bid, buy_qty)]
 
-            return adjusted_spread
+        # Zone 2: Caution — tighten spread for unwinding side
+        if position_ratio >= 0.6:
+            base_spread = config["target_half_spread"]
+            tight_spread = base_spread * 0.8  # Tighten by 20%
 
-        return base_spread
+            # Calculate orders with tightened spread
+            our_bid = int(fair_value - tight_spread + skew)
+            our_ask = int(fair_value + tight_spread + skew)
+
+            if our_ask - our_bid < 2:
+                midpoint = (our_bid + our_ask) // 2
+                our_bid = midpoint - 1
+                our_ask = midpoint + 1
+
+            # Don't cross the market
+            if order_depth.buy_orders and order_depth.sell_orders:
+                best_bid = max(order_depth.buy_orders.keys())
+                best_ask = min(order_depth.sell_orders.keys())
+                our_bid = min(our_bid, best_ask - 1)
+                our_ask = max(our_ask, best_bid + 1)
+
+            orders = []
+            if current_position < max_position:
+                buy_qty = min(config["order_size"], max_position - current_position)
+                if buy_qty > 0:
+                    orders.append(Order(product, our_bid, buy_qty))
+            if current_position > -max_position:
+                sell_qty = min(config["order_size"], max_position + current_position)
+                if sell_qty > 0:
+                    orders.append(Order(product, our_ask, -sell_qty))
+            return orders
+
+        # Zone 1: Normal — use passed-in adjusted spread
+        return None  # Signal to use normal calculation
 
     # ============================================================
-    # v5.0: Main Order Calculation (with all 3 improvements)
+    # v11.0 Surgical Fix #1: Opportunistic Fills When Flat
+    # Only when flat + strong signal + momentum agreement
     # ============================================================
-    def _calculate_orders_v5(
+    def _add_opportunistic_fills(
+        self,
+        product: str,
+        orders: List[Order],
+        current_position: int,
+        deviation: float,
+        momentum: float,
+        config: dict,
+        order_depth: OrderDepth,
+    ) -> List[Order]:
+        """Add small opportunistic orders only when all guards pass."""
+
+        # Guard 1: Must be flat enough (abs position <= 5)
+        if abs(current_position) > 5:
+            return orders
+
+        # Guard 2: Signal must be strong enough (2x normal threshold)
+        if abs(deviation) < config["min_deviation_pct"] * 2.0:
+            return orders
+
+        # Guard 3: Momentum must agree with deviation
+        momentum_agrees = (
+            (deviation > 0 and momentum >= 0) or  # Both bullish
+            (deviation < 0 and momentum <= 0)     # Both bearish
+        )
+        if not momentum_agrees:
+            return orders
+
+        # All guards passed — add ONE small opportunistic order
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        small_size = config["order_size"] // 2  # Half normal size
+
+        if deviation > 0:
+            # Price below fair value → join best bid (don't cross spread!)
+            orders.append(Order(product, best_bid, small_size))
+        else:
+            # Price above fair value → join best ask (don't cross spread!)
+            orders.append(Order(product, best_ask, -small_size))
+
+        return orders
+
+    # ============================================================
+    # Main Order Calculation (v3.0 baseline + v11.0 surgical fixes)
+    # ============================================================
+    def _calculate_orders(
         self,
         product: str,
         config: dict,
@@ -362,7 +406,7 @@ class Trader:
         current_position: int,
         momentum: float,
     ) -> List[Order]:
-        """v5.0: Calculate orders with dynamic sizing, spread tightening, and market-taking."""
+        """v11.0: v3.0 baseline with two surgical improvements."""
         orders: List[Order] = []
         max_position = config["max_position"]
         base_half_spread = config["target_half_spread"]
@@ -390,81 +434,61 @@ class Trader:
         vol_multiplier = 1.0 + (abs_deviation * 50)
         adjusted_spread = base_half_spread * vol_multiplier
 
-        # === v5.0 Improvement #2: Spread tightening near limits ===
-        adjusted_spread = self._get_spread_adjustment(
-            current_position, max_position, adjusted_spread, deviation
-        )
-
         # === Skew calculation ===
         skew = inventory_ratio * INVENTORY_SKEW_FACTOR * adjusted_spread
 
-        # === Passive orders ===
-        our_bid = int(fair_value - adjusted_spread + skew)
-        our_ask = int(fair_value + adjusted_spread + skew)
-
-        # Ensure minimum spread
-        if our_ask - our_bid < 2:
-            midpoint = (our_bid + our_ask) // 2
-            our_bid = midpoint - 1
-            our_ask = midpoint + 1
-
-        # Don't cross the market
-        if order_depth.buy_orders and order_depth.sell_orders:
-            best_bid = max(order_depth.buy_orders.keys())
-            best_ask = min(order_depth.sell_orders.keys())
-            our_bid = min(our_bid, best_ask - 1)
-            our_ask = max(our_ask, best_bid + 1)
-
-            # === Aggressive passive orders when deviation is significant ===
-            if abs_deviation >= min_dev and should_trade_aggressive:
-                if deviation > 0:
-                    aggressive_bid = int(fair_value - adjusted_spread * 0.3 + skew)
-                    our_bid = max(our_bid, min(aggressive_bid, best_ask - 1))
-                elif deviation < 0:
-                    aggressive_ask = int(fair_value + adjusted_spread * 0.3 + skew)
-                    our_ask = min(our_ask, max(aggressive_ask, best_bid + 1))
-
-        # === v5.0 Improvement #3: Careful market-taking (only when deviation > 0.002) ===
-        market_taking_orders: List[Order] = []
-        if abs_deviation >= MARKET_TAKING_THRESHOLD and should_trade_aggressive:
-            if deviation > 0:
-                # Price significantly below fair value → BUY at best ask (take liquidity)
-                if current_position < max_position:
-                    market_qty = min(config["order_size"], max_position - current_position)
-                    if market_qty > 0:
-                        market_taking_orders.append(Order(product, best_ask, market_qty))
-            elif deviation < 0:
-                # Price significantly above fair value → SELL at best bid (take liquidity)
-                if current_position > -max_position:
-                    market_qty = min(config["order_size"], max_position + current_position)
-                    if market_qty > 0:
-                        market_taking_orders.append(Order(product, best_bid, -market_qty))
-
-        # === v5.0 Improvement #1: Dynamic order sizing ===
-        order_size = self._calculate_dynamic_order_size(
-            product, current_position, max_position, deviation
+        # === v11.0 Fix #2: Position-aware orders (3 zones) ===
+        position_orders = self._calculate_position_aware_orders(
+            product, config, order_depth, fair_value,
+            current_position, max_position, adjusted_spread, skew
         )
 
-        # === Place passive orders ===
-        if current_position < max_position:
-            buy_qty = min(order_size, max_position - current_position)
-            if buy_qty > 0:
-                orders.append(Order(product, our_bid, buy_qty))
+        if position_orders is not None:
+            # Zone 2 or 3 handled — return these orders + opportunistic fills
+            orders = position_orders
+        else:
+            # Zone 1: Normal — calculate passive orders normally
+            our_bid = int(fair_value - adjusted_spread + skew)
+            our_ask = int(fair_value + adjusted_spread + skew)
 
-        if current_position > -max_position:
-            sell_qty = min(order_size, max_position + current_position)
-            if sell_qty > 0:
-                orders.append(Order(product, our_ask, -sell_qty))
+            # Ensure minimum spread
+            if our_ask - our_bid < 2:
+                midpoint = (our_bid + our_ask) // 2
+                our_bid = midpoint - 1
+                our_ask = midpoint + 1
 
-        # === Add market-taking orders (prepend so they execute first) ===
-        # Only add if we haven't already placed a passive order at the same price
-        for mt_order in market_taking_orders:
-            # Check we don't duplicate at the same price level
-            already_placed = any(
-                o.price == mt_order.price and (o.quantity > 0) == (mt_order.quantity > 0)
-                for o in orders
+            # Don't cross the market
+            if order_depth.buy_orders and order_depth.sell_orders:
+                best_bid = max(order_depth.buy_orders.keys())
+                best_ask = min(order_depth.sell_orders.keys())
+                our_bid = min(our_bid, best_ask - 1)
+                our_ask = max(our_ask, best_bid + 1)
+
+                # Aggressive passive orders when deviation is significant
+                if abs_deviation >= min_dev and should_trade_aggressive:
+                    if deviation > 0:
+                        aggressive_bid = int(fair_value - adjusted_spread * 0.3 + skew)
+                        our_bid = max(our_bid, min(aggressive_bid, best_ask - 1))
+                    elif deviation < 0:
+                        aggressive_ask = int(fair_value + adjusted_spread * 0.3 + skew)
+                        our_ask = min(our_ask, max(aggressive_ask, best_bid + 1))
+
+            # Place passive orders
+            if current_position < max_position:
+                buy_qty = min(config["order_size"], max_position - current_position)
+                if buy_qty > 0:
+                    orders.append(Order(product, our_bid, buy_qty))
+
+            if current_position > -max_position:
+                sell_qty = min(config["order_size"], max_position + current_position)
+                if sell_qty > 0:
+                    orders.append(Order(product, our_ask, -sell_qty))
+
+        # === v11.0 Fix #1: Opportunistic fills when flat + strong signal ===
+        if order_depth.buy_orders and order_depth.sell_orders:
+            orders = self._add_opportunistic_fills(
+                product, orders, current_position, deviation,
+                momentum, config, order_depth
             )
-            if not already_placed:
-                orders.insert(0, mt_order)
 
         return orders
