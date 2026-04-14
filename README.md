@@ -1,342 +1,174 @@
-# Prosperity 4 - Algorithmic Trading Bot
+# Prosperity 4 - Round 1 Trading Algorithm
 
-## Version 3.0: Stateless-Aware Mean-Reversion Market Maker
-
-### Overview
-
-This trading bot implements a **stateless-aware mean-reversion market-making strategy** designed for the Prosperity trading competition. The algorithm passively places bid and ask orders around an estimated fair value, with full state persistence across AWS Lambda invocations.
+## 📊 **Best Performance: +1,296 XIRECS (v2.0)**
 
 ---
 
-## Version History
-
-### v3.0 (Current) - Stateless-Aware Market Maker
-Critical fixes and optimizations based on v2.0 performance analysis:
-- **CRITICAL: Full state persistence via `traderData`** — AWS Lambda is stateless; all state (fair values, price history, positions) is serialized to JSON and restored each invocation
-- **EMA-based fair value** — Replaced sliding-window median with exponential moving average (no drift, no window edge effects)
-- **EMERALDS optimized** — Tighter spread (3→5), larger orders (8→5), lower deviation threshold — EMERALDS now contributes to PNL
-- **Relaxed momentum filter** — Threshold increased from 0.0003 to 0.0005 (don't miss profitable trades)
-- **Position tracking via `own_trades`** — Internal position tracker supplements platform position for robustness
-- **Adaptive spread** — Volatility multiplier reduced (50 vs 100) for better fill rates
-- **v2.0 result**: Final PNL of **+800.13** (6.7x improvement over v1.0's +120)
-
-### v2.0 - Conservative Mean-Reversion Market Maker
-Major rewrite addressing severe drawdown issues found in v1.0:
-- **Passive market making**: Earn the spread instead of paying it
-- **Momentum filter**: Avoid trading against strong price trends
-- **Minimum deviation threshold**: Only trade when price meaningfully deviates from fair value
-- **Reduced position sizing**: Smaller orders and tighter position limits
-- **Volatility-adjusted spreads**: Wider spreads in volatile conditions
-- **Per-product `ProductTracker`**: Clean state management with price history, fair value, and momentum tracking
-- **Result**: Final PNL of **+800.13** vs v1.0's +120 (6.7x improvement)
-
-### v1.0 - Mean-Reversion Market Maker
-- Rolling median fair value estimation
-- Volatility-adjusted spread sizing
-- Inventory-based quote skewing
-- Conservative position limits
-- Backtested on historical data
-- **Result**: Final PNL of ~+120 with -500 max drawdown
-
----
-
-## Strategy Approach
-
-### Core Philosophy
-
-**Version 2.0** uses a **conservative passive market-making** approach focused on earning the spread rather than aggressively taking liquidity:
-
-1. **Earn, don't pay**: Place passive limit orders inside the spread — never cross the market by buying at the ask or selling at the bid
-2. **Trade with conviction**: Only place aggressive orders when price deviation from fair value exceeds a minimum threshold
-3. **Respect momentum**: Don't fight strong directional price moves — if price is crashing, don't catch the falling knife
-4. **Limit risk**: Smaller order sizes and tighter position limits to control drawdowns
-
-### Key Insights from Data Analysis
-
-#### EMERALDS
-- **Extremely stable**: Trades in a tight range around 10,000 (±4 points)
-- **Mid price range**: 9,996 - 10,004
-- **Average spread**: ~15.74 points
-- **Low volatility**: Predictable mean-reverting behavior
-- **Trade frequency**: 399 trades over the dataset
-
-#### TOMATOES
-- **More volatile**: Trades around 4,993 with wider swings
-- **Mid price range**: 4,946 - 5,036 (90-point range!)
-- **Average spread**: ~13.02 points
-- **Higher opportunity**: More deviation from mean = more trading signals
-- **Trade frequency**: 820 trades over the dataset
-
----
-
-## Strategy Components
-
-### 1. Fair Value Estimation (v3.0: EMA-based)
-- **Method**: Exponential Moving Average (EMA) of mid-prices
-- **Why EMA?**: No sliding window edge effects, no drift, smooth adaptation
-- **Alpha**: 0.1 (EMERALDS), 0.15 (TOMATOES — slightly faster adaptation)
-- **Fallback**: Uses first observed mid-price as initial fair value
-
-```
-FV_new = alpha * mid_price + (1 - alpha) * FV_old
-```
-
-### 2. Passive Market Making
-
-Instead of aggressively taking liquidity at the best bid/ask, we place **passive limit orders** inside the spread:
-
-```
-Base Half-Spread = 5.0 (both products, reduced from v1)
-
-Optimal Bid = Fair Value - Adjusted Half-Spread + Inventory Skew
-Optimal Ask = Fair Value + Adjusted Half-Spread + Inventory Skew
-```
-
-These orders sit **between** the best bid and best ask, earning the spread when they get filled. We only cross the spread when price deviation exceeds our minimum threshold.
-
-### 3. Minimum Deviation Threshold
-
-Only place aggressive orders (closer to mid price) when the deviation is meaningful:
-
-| Product | Min Deviation | Rationale |
-|---------|--------------|-----------|
-| EMERALDS | 0.08% | Low volatility, small moves are noise |
-| TOMATOES | 0.12% | Higher volatility, needs larger signal |
-
-```python
-if abs_deviation >= min_deviation and momentum_supports_direction:
-    # Move orders closer to mid price for faster fill
-    aggressive_bid = Fair Value - Adjusted Spread × 0.5
-```
-
-### 4. Momentum Filter (New in v2.0)
-
-Tracks price direction over the last 5 ticks to avoid trading against trends:
-
-```
-Momentum = Avg(recent prices second half) - Avg(recent prices first half)
-```
-
-**Decision rules:**
-- Price below fair value (want to buy) + momentum strongly negative (falling) → **skip trade**
-- Price above fair value (want to sell) + momentum strongly positive (rising) → **skip trade**
-- All other cases → trade normally
-
-This prevents "catching falling knives" and reduces large drawdowns.
-
-### 5. Volatility Adjustment
-- **Purpose**: Widen spreads during volatile periods to protect against adverse selection
-- **Method**: Scale spread based on absolute deviation from fair value
-- **Formula**:
-  ```
-  Vol Multiplier = 1.0 + (|Deviation| × 100)
-  Adjusted Spread = Base Spread × Vol Multiplier
-  ```
-
-### 6. Inventory Management
-- **Purpose**: Prevent accumulating too large a position in one direction
-- **Mechanism**: Skew quotes based on current inventory
-  - **Long position**: Lower bids/asks to encourage selling
-  - **Short position**: Raise bids/asks to encourage buying
-- **Position limits** (reduced in v2.0):
-
-| Product | v1.0 Limit | v2.0 Limit | Change |
-|---------|-----------|-----------|--------|
-| EMERALDS | ±30 | **±20** | -33% |
-| TOMATOES | ±25 | **±15** | -40% |
-
-- **Skew factor**: Reduced from 0.5 → **0.3** (less aggressive position reduction)
-
-```
-Inventory Skew = (Current Position / Max Position) × 0.3 × Spread
-```
-
-### 7. Order Sizing (Reduced in v2.0)
-
-| Product | v1.0 Order Size | v2.0 Order Size | Change |
-|---------|----------------|----------------|--------|
-| EMERALDS | 8 | **5** | -37% |
-| TOMATOES | 5 | **3** | -40% |
-
-Smaller orders mean smaller losses on any single wrong trade.
-
----
-
-## Configuration
-
-```python
-PRODUCT_CONFIG = {
-    "EMERALDS": {
-        "fair_value_default": 10000,
-        "target_half_spread": 3,          # Tighter (v3.0: was 5)
-        "order_size": 8,                   # Larger (v3.0: was 5)
-        "max_position": 20,
-        "min_deviation_pct": 0.0005,      # Lower (v3.0: was 0.0008)
-        "ema_alpha": 0.1,                  # EMA smoothing (v3.0: new)
-    },
-    "TOMATOES": {
-        "fair_value_default": 5000,
-        "target_half_spread": 4,           # Tighter (v3.0: was 5)
-        "order_size": 5,                   # Larger (v3.0: was 3)
-        "max_position": 15,
-        "min_deviation_pct": 0.001,       # Lower (v3.0: was 0.0012)
-        "ema_alpha": 0.15,                 # EMA smoothing (v3.0: new)
-    },
-}
-
-# Global settings
-INVENTORY_SKEW_FACTOR = 0.3
-MOMENTUM_WINDOW = 5
-MOMENTUM_THRESHOLD = 0.0005               # Relaxed (v3.0: was 0.0003)
-```
-
----
-
-## Architecture
-
-### File Structure
+## 📁 **Project Structure**
 
 ```
 Prosperity 4/
-├── trader.py                   # Main trading algorithm (v2.0)
-├── trading_bot.py              # Legacy backtesting code (v1.0)
-├── README.md                   # This file
-└── TUTORIAL_ROUND_1/           # Historical market data
-    ├── prices_round_0_day_-1.csv
-    ├── prices_round_0_day_-2.csv
-    ├── trades_round_0_day_-1.csv
-    └── trades_round_0_day_-2.csv
-```
-
-### Core Classes
-
-| Class | Purpose |
-|-------|---------|
-| `Trader` | Main entry point — `run()` method called by platform |
-| `ProductTracker` | Per-product state: price history, fair value, momentum, volatility |
-| `Order` | Order representation matching platform's datamodel |
-| `OrderDepth` | Buy/sell order book representation |
-| `TradingState` | Full market state snapshot |
-
-### Data Flow
-
-```
-TradingState (from platform)
-        ↓
-    Trader.run()
-        ↓
-  For each product:
-        ↓
-  ProductTracker.update(mid_price)
-        ↓
-  ┌───────┼──────────────────────┐
-  ↓       ↓                      ↓
-Fair Value  Momentum        Volatility
-  ↓       ↓                      ↓
-  Calculate Optimal Bid/Ask with all adjustments
-        ↓
-  ┌─────┴──────────────────────┐
-  ↓                            ↓
-Passive Orders             Aggressive Orders
-(inside spread, earn)      (if deviation > threshold)
-        ↓
-  Return [Order, ...] per product
+│
+├── 📖 README.md                          # This file - project overview
+│
+├── 🤖 algorithms/                        # Trading algorithm implementations
+│   ├── round1_trader.py                  # v1.0 - Original (FAILED: -395 XIRECS)
+│   ├── round1_trader_v2.py               # v2.0 - Osmium only ✅ (BEST: +1,296 XIRECS)
+│   └── round1_trader_v3.py               # v3.0 - Both products (MIXED: +741 XIRECS)
+│
+├── 🧪 tests/                             # Test suites for algorithms
+│   ├── test_round1_trader.py             # Tests for v1.0
+│   ├── test_v2.py                        # Tests for v2.0
+│   └── test_v3.py                        # Tests for v3.0
+│
+├── 🔍 analysis/                          # Data analysis scripts
+│   ├── analyze_round1_data.py            # Initial Round 1 data exploration
+│   ├── analyze_round1_corrected.py       # Corrected statistical analysis
+│   ├── analyze_performance.py            # Performance breakdown (v1.0)
+│   ├── deep_analysis.py                  # Deep dive into v1.0 failure
+│   ├── final_diagnosis.py                # Root cause identification
+│   ├── analyze_pepper_deep.py            # Pepper behavioral analysis
+│   ├── pepper_forensic.py                # Forensic analysis of v3.0 Pepper
+│   ├── pepper_smoking_gun.py             # Smoking gun: adverse selection
+│   └── analyze_v3.py                     # v3.0 performance analysis
+│
+├──  docs/                              # Documentation & reports
+│   ├── notes.md                          # Platform rules & guidelines
+│   ├── ROUND1_README.md                  # v1.0 strategy documentation
+│   ├── ROUND1_V2_FIX.md                  # v2.0 fix documentation
+│   ├── ROUND1_V3_STRATEGY.md             # v3.0 strategy documentation
+│   ├── PERFORMANCE_ANALYSIS.md           # v1.0 performance breakdown
+│   └── PEPPER_ANALYSIS_COMPLETE.md       # Complete Pepper analysis
+│
+├── 📈 round1/                            # Round 1 data & results
+│   ├── ROUND1/                           # Historical market data
+│   │   ├── prices_round_1_day_-2.csv
+│   │   ├── prices_round_1_day_-1.csv
+│   │   ├── prices_round_1_day_0.csv
+│   │   ├── trades_round_1_day_-2.csv
+│   │   ├── trades_round_1_day_-1.csv
+│   │   └── trades_round_1_day_0.csv
+│   ├── 119569.json                       # v1.0 results (-395 XIRECS)
+│   ├── 119569.log                        # v1.0 detailed logs
+│   ├── 121250.json                       # v2.0 results (+1,296 XIRECS)
+│   ├── 121250.log                        # v2.0 detailed logs
+│   ├── 123540.json                       # v3.0 results (+741 XIRECS)
+│   ├── 123540.log                        # v3.0 detailed logs
+│   ├── img.png                           # v1.0 PnL chart
+│   ├── img2.png                          # v2.0 PnL chart
+│   └── img3.png                          # v3.0 PnL chart
+│
+└── Tutorial round/                       # Tutorial round materials
+    ├── README.md                         # Tutorial strategy docs
+    ├── trader.py                         # Tutorial round algorithm
+    ├── Data Sets/                        # Tutorial historical data
+    └── Performance Analysis/             # Tutorial performance charts
 ```
 
 ---
 
-## What Changed Across Versions
+## 🎯 **Quick Start**
 
-### v2.0 → v3.0 (Current)
+### **For Competition: Use v2.0**
 
-| Problem in v2.0 | v2.0 Behavior | v3.0 Fix |
-|-----------------|--------------|----------|
-| State lost between calls | Class variables reset each Lambda invocation | Full JSON serialization via `traderData` |
-| Fair value drift | Sliding window median loses old prices | EMA with no window edge effects |
-| EMERALDS underperforming | Half-spread=5, order_size=5 — orders rarely filled | Half-spread=3, order_size=8 — more fills |
-| Missing profitable trades | Momentum threshold=0.0003 too aggressive | Threshold=0.0005 — less blocking |
-| Position tracking gaps | Relied solely on platform position | Dual tracking: platform + `own_trades` |
-
-### v1.0 → v2.0
-
-| Problem | v1.0 Behavior | v2.0 Fix |
-|---------|--------------|----------|
-| Paying spread | Bought at best ask, sold at best bid | Passive orders inside spread |
-| No conviction | Traded every tick | Min deviation threshold |
-| Fighting trends | No momentum check | Momentum filter blocks counter-trend trades |
-| Large drawdowns | Order size 5-8, max pos 25-30 | Order size 3-5, max pos 15-20 |
-| Noise trading | No threshold | 0.08%-0.12% deviation required |
-
----
-
-## How to Run
-
-### Requirements
-- Python 3.10+
-- No external dependencies (pure standard library)
-
-### Test Locally
 ```bash
-python3 -c "from trader import Trader; print('OK')"
+# Upload this file to Prosperity platform
+algorithms/round1_trader_v2.py
 ```
 
-### Submit to Platform
-Upload `trader.py` — the platform will call `Trader().run(state)` each iteration.
+**Expected Result:** +1,296 XIRECS ✅
+
+### **Run Tests Locally**
+
+```bash
+# Test v2.0 algorithm
+python3 tests/test_v2.py
+
+# Test v3.0 algorithm
+python3 tests/test_v3.py
+```
+
+### **Analyze Performance**
+
+```bash
+# Analyze Round 1 data
+python3 analysis/analyze_round1_corrected.py
+
+# Analyze Pepper behavior
+python3 analysis/pepper_smoking_gun.py
+
+# Analyze v3.0 results
+python3 analysis/analyze_v3.py
+```
 
 ---
 
-## Future Improvements (v3.0+)
+## 📊 **Version Performance Summary**
 
-### Planned Enhancements
-
-1. **Pair Trading Strategy**
-   - Exploit price relationships between products
-   - Statistical arbitrage when spread deviates from normal
-
-2. **Order Book Dynamics**
-   - Analyze order flow imbalances
-   - Detect market maker vs taker activity
-   - Predict short-term price movements from book pressure
-
-3. **Adaptive Parameters**
-   - Dynamic spread sizing based on time of day
-   - Position limits that adjust to market conditions
-   - Machine learning for fair value estimation
-
-4. **Execution Optimization**
-   - Smart order routing (when to use limit vs market orders)
-   - Order sizing based on available liquidity
-   - Iceberg orders for large positions
-
-5. **Risk Management**
-   - Stop-loss mechanisms
-   - Drawdown limits
-   - Correlation-based portfolio risk
-
-6. **Performance Metrics**
-   - Sharpe ratio calculation
-   - Maximum drawdown tracking
-   - Profit attribution by signal type
+| Version | File | Strategy | Osmium | Pepper | **Total** | Status |
+|---------|------|----------|--------|--------|-----------|--------|
+| **v1.0** | `algorithms/round1_trader.py` | Both products (mean-reversion) | +1,296 | -1,692 | **-395** ❌ | Failed |
+| **v2.0** | `algorithms/round1_trader_v2.py` | Osmium only | +1,296 | 0 | **+1,296** ✅ | **BEST** |
+| **v3.0** | `algorithms/round1_trader_v3.py` | Both (conservative) | +1,297 | -556 | **+741** ⚠️ | Mixed |
 
 ---
 
-## Development Workflow
+## 🔑 **Key Learnings**
 
-When iterating on the strategy:
+### **ASH_COATED_OSMIUM: Easy Profit** ✅
+- Mean-reversion market making works perfectly
+- Tight spreads (4 points half-spread)
+- Large orders (10 units)
+- **Result: +1,296 XIRECS consistently**
 
-1. **Modify** `trader.py` (strategy logic in `Trader.run()`)
-2. **Test** by importing and running with mock `TradingState`
-3. **Upload** to Prosperity platform for simulation
-4. **Analyze** the PNL graph and log files
-5. **Compare** performance across versions
-6. **Document** changes in this README under "Version History"
+### **INTARIAN_PEPPER_ROOT: Unwinnable** ❌
+- 99.4% adverse selection rate (bots have information)
+- Steady upward trend (+0.08% per 100 ticks)
+- Bots asymmetrically trade against us
+- **Result: Always loses money (-556 to -1,692)**
+
+### **Critical Insight**
+```
+Market making fails on trending assets with informed counterparties.
+Bots know the trend direction and selectively trade against us.
+```
 
 ---
 
-## Contact & Support
+## 📚 **Documentation Guide**
 
-For questions about the strategy or to collaborate on improvements, reach out to the team.
+### **Start Here:**
+1. `docs/notes.md` - Platform rules and guidelines
+2. `docs/ROUND1_V2_FIX.md` - Why v2.0 works
+
+### **Understanding the Failure:**
+3. `docs/PERFORMANCE_ANALYSIS.md` - v1.0 breakdown
+4. `docs/PEPPER_ANALYSIS_COMPLETE.md` - Complete Pepper analysis
+
+### **Algorithm Details:**
+5. `docs/ROUND1_README.md` - v1.0 strategy
+6. `docs/ROUND1_V3_STRATEGY.md` - v3.0 strategy
 
 ---
 
-**Disclaimer**: This is a competition trading bot. Past performance does not guarantee future results. Always test thoroughly before deploying.
+## 🚀 **Next Steps**
+
+1. ✅ **Upload v2.0** to Prosperity platform
+2. ✅ **Monitor results** (should be ~+1,296 XIRECS)
+3. ⚠️ **Don't trade Pepper** - it's unwinnable
+4. 💡 **Focus on optimizing Osmium** if needed
+
+---
+
+## 📞 **Support**
+
+For questions about the algorithm or analysis:
+- Check `docs/` folder for detailed explanations
+- Run analysis scripts in `analysis/` to reproduce findings
+- Review test files in `tests/` for algorithm behavior
+
+---
+
+**Last Updated:** April 2026  
+**Best Version:** v2.0 (`algorithms/round1_trader_v2.py`)  
+**Expected PnL:** +1,296 XIRECS ✅
