@@ -58,10 +58,12 @@ Running `find_pepper_fv.py` on all three days of historical data revealed:
 
 | Day | Min | Median | Max | Intraday Drift |
 |-----|----:|-------:|----:|---------------:|
-| −2 | 9,998 | 10,500 | 11,003 | **~+1003** ⚠️ |
+| −2 | 9,998 | 10,500 | 11,003 | **~+1000** ⚠️ |
 | −1 | 10,995 | 11,500 | 12,006 | **~+1000** ⚠️ |
-| 0 | 11,994 | 12,500 | 13,007 | **~+1002** ⚠️ |
+| 0 | 11,994 | 12,500 | 13,007 | **~+1000** ⚠️ |
 | 1 *(live)* | ~12,994 | **~13,500** | ~14,007 | ~+1000 extrapolated |
+
+> Intraday drift above is measured as **end-of-day mid − start-of-day mid**.
 
 Pepper rises roughly **+1000 XIRECS every day** in historical Round 1 data. A fixed fair value (as used in v1–v3) fights the trend and increases adverse-selection risk. The fix is to **track the price with adaptive EMA**, apply long bias, and enforce strict short-side guardrails.
 

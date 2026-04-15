@@ -19,6 +19,8 @@ from io import StringIO
 from pathlib import Path
 from statistics import mean
 
+DELTA_EPSILON = 1e-9
+
 
 def drawdown(values):
     if not values:
@@ -34,7 +36,7 @@ def drawdown(values):
 def event_metrics(series):
     if len(series) < 2:
         return 0.0, 0.0
-    deltas = [series[i] - series[i - 1] for i in range(1, len(series)) if abs(series[i] - series[i - 1]) > 1e-9]
+    deltas = [series[i] - series[i - 1] for i in range(1, len(series)) if abs(series[i] - series[i - 1]) > DELTA_EPSILON]
     if not deltas:
         return 0.0, 0.0
     neg = sum(1 for d in deltas if d < 0)
@@ -49,15 +51,16 @@ def inferred_inventory_extreme(prices, pnls, window=100):
     if len(prices) < window or len(pnls) < window:
         return 0.0
     inferred = []
-    for i in range(window, min(len(prices), len(pnls)) + 1, window):
+    series_len = min(len(prices), len(pnls))
+    for i in range(window, series_len + 1, window):
         p0, p1 = prices[i - window], prices[i - 1]
         l0, l1 = pnls[i - window], pnls[i - 1]
         dp = p1 - p0
         dl = l1 - l0
-        if abs(dp) < 1e-9:
+        if abs(dp) < DELTA_EPSILON:
             inferred.append(0.0)
         else:
-            inferred.append(abs(-dl / dp))
+            inferred.append(abs(dl / dp))
     return max(inferred) if inferred else 0.0
 
 
@@ -69,10 +72,14 @@ def parse_result(path: Path):
     rows = list(csv.DictReader(StringIO(activities), delimiter=";"))
 
     by_product = {}
+    total_by_ts = {}
     for r in rows:
         p = r["product"]
+        ts = int(r["timestamp"])
+        pnl = float(r["profit_and_loss"])
+        total_by_ts[ts] = total_by_ts.get(ts, 0.0) + pnl
         by_product.setdefault(p, {"pnl": [], "mid": []})
-        by_product[p]["pnl"].append(float(r["profit_and_loss"]))
+        by_product[p]["pnl"].append(pnl)
         by_product[p]["mid"].append(float(r["mid_price"]))
 
     product_metrics = {}
@@ -88,10 +95,7 @@ def parse_result(path: Path):
             "inventory_extreme_proxy": inferred_inventory_extreme(mid_series, pnl_series),
         }
 
-    total_series = [
-        sum(by_product[p]["pnl"][i] for p in by_product if i < len(by_product[p]["pnl"]))
-        for i in range(max(len(by_product[p]["pnl"]) for p in by_product))
-    ] if by_product else []
+    total_series = [total_by_ts[t] for t in sorted(total_by_ts)] if total_by_ts else []
     total_adverse, total_asymmetry = event_metrics(total_series)
 
     return {

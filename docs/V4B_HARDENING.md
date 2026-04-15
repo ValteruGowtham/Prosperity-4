@@ -25,7 +25,7 @@ This update hardens `algorithms/round1_trader_v4.py` against regime shifts and a
 
 ## Data assumption alignment
 
-Historical Round 1 Pepper data shows intraday drift closer to **~+1000/day** than +500/day.
+Historical Round 1 Pepper data shows intraday drift closer to **~+1000 XIRECS/day** than +500/day.
 
 Reproducible check:
 

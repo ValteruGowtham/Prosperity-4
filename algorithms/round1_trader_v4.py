@@ -162,7 +162,7 @@ PRODUCT_CONFIG = {
         "use_ema":           True,      # ✅ EMA tracks the continuous upward drift
         "ema_alpha":         0.10,      # Faster adaptation to track the trend
         "trend_bias":        0.5,       # Bias bid/ask toward buy side (uptrend)
-        "ema_anchor_weight": 0.10,      # Keep EMA mostly adaptive; small anchor to seed
+        "ema_anchor_weight": 0.10,      # Keep EMA mostly adaptive; retain small seed influence during warm-up
         "trend_lookahead":   8,         # Project EMA by near-term trend slope
         "max_short":         8,         # Strong short-side guardrail in trending market
         "disable_passive_sell_in_uptrend": True,
@@ -173,6 +173,7 @@ PRODUCT_CONFIG = {
         "toxicity_threshold": 1.5,      # Widen/slow quoting when fills turn toxic
         "max_extra_width":   3,         # Max additional width from risk signals
         "min_order_size":    2,
+        "risk_reduce_size_multiplier": 2,
     },
 }
 
@@ -485,7 +486,10 @@ class Trader:
         tox = float(self.state.toxicity_score.get(product, 0.0))
         tox_threshold = float(cfg.get("toxicity_threshold", 10**9))
         if tox > tox_threshold:
-            extra = min(int(cfg.get("max_extra_width", 2)), 1 + int((tox - tox_threshold) // max(1.0, tox_threshold)))
+            # Scale extra width by how far toxicity is above threshold.
+            toxicity_ratio = (tox - tox_threshold) / max(1.0, tox_threshold)
+            calculated_extra_width = max(0, int(toxicity_ratio))
+            extra = min(int(cfg.get("max_extra_width", 2)), calculated_extra_width)
             take_width += extra
             make_width += extra
             order_size = max(min_size, order_size - extra)
@@ -493,13 +497,15 @@ class Trader:
         return take_width, make_width, order_size
 
     def _risk_reduce_only_orders(
-        self, product: str, order_depth: OrderDepth, position: int, order_size: int
+        self, product: str, cfg: dict, order_depth: OrderDepth, position: int, order_size: int
     ) -> List[Order]:
         if position == 0:
             return []
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-        qty = min(abs(position), max(1, order_size * 2))
+        multiplier = int(cfg.get("risk_reduce_size_multiplier", 2))
+        multiplier = max(1, multiplier)
+        qty = min(abs(position), max(1, order_size * multiplier))
         if position > 0:
             return [Order(product, best_bid, -qty)]
         return [Order(product, best_ask, qty)]
@@ -534,7 +540,7 @@ class Trader:
         best_ask   = min(order_depth.sell_orders.keys())
 
         if self.state.kill_switch.get(product, False):
-            return self._risk_reduce_only_orders(product, order_depth, position, order_size)
+            return self._risk_reduce_only_orders(product, cfg, order_depth, position, order_size)
 
         # ── Imbalance-adjusted fair value ─────────────────────
         # If buy pressure is high (imbalance > 0), nudge FV up slightly.
