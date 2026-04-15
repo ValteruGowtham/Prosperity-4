@@ -132,8 +132,8 @@ class TradingState:
 # ─── VERIFIED VALUES (from find_pepper_fv.py on real data) ──────
 OSMIUM_FAIR_VALUE  = 10_000   # Stable, confirmed fixed at 10,000
 
-# Pepper trends +500 XIRECS per day (NOT a fixed-FV product).
-# Day -2 median=10500, Day -1 median=11500, Day 0 median=12500.
+# Pepper trends ~+1000 XIRECS per day in historical Round 1 data.
+# Day -2 median≈10500, Day -1 median≈11500, Day 0 median≈12500.
 # Day 1 (live round) extrapolated start ≈ 13,500.
 # We use EMA (use_ema=True) to track the trend dynamically.
 # This seed value is the starting estimate; EMA will adapt fast.
@@ -162,6 +162,17 @@ PRODUCT_CONFIG = {
         "use_ema":           True,      # ✅ EMA tracks the continuous upward drift
         "ema_alpha":         0.10,      # Faster adaptation to track the trend
         "trend_bias":        0.5,       # Bias bid/ask toward buy side (uptrend)
+        "ema_anchor_weight": 0.10,      # Keep EMA mostly adaptive; small anchor to seed
+        "trend_lookahead":   8,         # Project EMA by near-term trend slope
+        "max_short":         8,         # Strong short-side guardrail in trending market
+        "disable_passive_sell_in_uptrend": True,
+        "uptrend_slope_threshold": 0.25,
+        "drawdown_limit":    800.0,     # Per-product mark-to-market brake
+        "drawdown_recover":  200.0,     # Re-enable only after partial recovery
+        "toxicity_alpha":    0.2,       # Fill-toxicity EMA smoothing
+        "toxicity_threshold": 1.5,      # Widen/slow quoting when fills turn toxic
+        "max_extra_width":   3,         # Max additional width from risk signals
+        "min_order_size":    2,
     },
 }
 
@@ -176,6 +187,14 @@ class SerializableState:
         self.last_timestamp: int = 0
         # Imbalance signal tracking
         self.imbalance_history: Dict[str, List[float]] = {}
+        self.mid_history: Dict[str, List[float]] = {}
+        self.last_mid: Dict[str, float] = {}
+        self.last_position: Dict[str, int] = {}
+        self.mtm_pnl: Dict[str, float] = {}
+        self.peak_mtm_pnl: Dict[str, float] = {}
+        self.kill_switch: Dict[str, bool] = {}
+        self.toxicity_score: Dict[str, float] = {}
+        self.last_trade_ts: Dict[str, int] = {}
 
     def to_dict(self) -> dict:
         return {
@@ -183,6 +202,14 @@ class SerializableState:
             "price_history":     self.price_history,
             "last_timestamp":    self.last_timestamp,
             "imbalance_history": self.imbalance_history,
+            "mid_history":       self.mid_history,
+            "last_mid":          self.last_mid,
+            "last_position":     self.last_position,
+            "mtm_pnl":           self.mtm_pnl,
+            "peak_mtm_pnl":      self.peak_mtm_pnl,
+            "kill_switch":       self.kill_switch,
+            "toxicity_score":    self.toxicity_score,
+            "last_trade_ts":     self.last_trade_ts,
         }
 
     @staticmethod
@@ -192,6 +219,14 @@ class SerializableState:
         s.price_history     = data.get("price_history", {})
         s.last_timestamp    = data.get("last_timestamp", 0)
         s.imbalance_history = data.get("imbalance_history", {})
+        s.mid_history       = data.get("mid_history", {})
+        s.last_mid          = data.get("last_mid", {})
+        s.last_position     = data.get("last_position", {})
+        s.mtm_pnl           = data.get("mtm_pnl", {})
+        s.peak_mtm_pnl      = data.get("peak_mtm_pnl", {})
+        s.kill_switch       = data.get("kill_switch", {})
+        s.toxicity_score    = data.get("toxicity_score", {})
+        s.last_trade_ts     = data.get("last_trade_ts", {})
         return s
 
     def serialize(self) -> str:
@@ -233,6 +268,14 @@ class Trader:
             # New day reset — keep EMA estimates, clear short-term history
             self.state.price_history = {}
             self.state.imbalance_history = {}
+            self.state.mid_history = {}
+            self.state.last_mid = {}
+            self.state.last_position = {}
+            self.state.mtm_pnl = {}
+            self.state.peak_mtm_pnl = {}
+            self.state.kill_switch = {}
+            self.state.toxicity_score = {}
+            self.state.last_trade_ts = {}
 
         result: Dict[str, List[Order]] = {}
 
@@ -248,6 +291,14 @@ class Trader:
             if not order_depth.buy_orders or not order_depth.sell_orders:
                 result[product] = []
                 continue
+
+            best_bid = max(order_depth.buy_orders.keys())
+            best_ask = min(order_depth.sell_orders.keys())
+            mid = (best_bid + best_ask) / 2.0
+            self._update_market_state(product, cfg, mid, position)
+            self._update_fill_toxicity(
+                product, cfg, state.own_trades.get(product, []), mid
+            )
 
             # ── Fair value resolution ──────────────────────────
             fv = self._resolve_fair_value(product, cfg, order_depth)
@@ -297,8 +348,12 @@ class Trader:
                 alpha * mid + (1 - alpha) * self.state.ema_fv[product]
             )
 
-        # Return hardcoded FV (EMA tracked separately for diagnostics)
-        return config_fv
+        trend_slope = self._trend_slope(product)
+        projected = self.state.ema_fv[product] + trend_slope * cfg.get("trend_lookahead", 0)
+        anchor_weight = cfg.get("ema_anchor_weight", 0.0)
+
+        # Adaptive FV with small anchor only for seed stability.
+        return (1 - anchor_weight) * projected + anchor_weight * config_fv
 
     # ──────────────────────────────────────────────────────────
     # Order book imbalance — the "hidden pattern" signal
@@ -342,6 +397,113 @@ class Trader:
             return 0.0
         return sum(hist) / len(hist)
 
+    def _trend_slope(self, product: str, window: int = 20) -> float:
+        mids = self.state.mid_history.get(product, [])
+        if len(mids) < 2:
+            return 0.0
+        lookback = mids[-window:]
+        return (lookback[-1] - lookback[0]) / max(1, len(lookback) - 1)
+
+    def _update_market_state(self, product: str, cfg: dict, mid: float, position: int):
+        mids = self.state.mid_history.setdefault(product, [])
+        mids.append(mid)
+        if len(mids) > 100:
+            self.state.mid_history[product] = mids[-100:]
+
+        prev_mid = self.state.last_mid.get(product)
+        prev_pos = self.state.last_position.get(product, position)
+        if prev_mid is not None:
+            mtm = self.state.mtm_pnl.get(product, 0.0)
+            mtm += prev_pos * (mid - prev_mid)
+            self.state.mtm_pnl[product] = mtm
+            peak = max(self.state.peak_mtm_pnl.get(product, mtm), mtm)
+            self.state.peak_mtm_pnl[product] = peak
+
+            drawdown = peak - mtm
+            limit = float(cfg.get("drawdown_limit", 10**18))
+            recover = float(cfg.get("drawdown_recover", limit * 0.5))
+            if drawdown >= limit:
+                self.state.kill_switch[product] = True
+            elif self.state.kill_switch.get(product, False) and drawdown <= recover:
+                self.state.kill_switch[product] = False
+
+        self.state.last_mid[product] = mid
+        self.state.last_position[product] = position
+
+    def _update_fill_toxicity(
+        self, product: str, cfg: dict, own_trades: List[Trade], mid: float
+    ):
+        if not own_trades:
+            return
+        last_ts = self.state.last_trade_ts.get(product, -1)
+        alpha = float(cfg.get("toxicity_alpha", 0.2))
+        score = float(self.state.toxicity_score.get(product, 0.0))
+        max_seen_ts = last_ts
+
+        for tr in own_trades:
+            if tr.timestamp <= last_ts:
+                continue
+            qty = abs(tr.quantity)
+            signed_qty = 0
+            if tr.buyer == "SUBMISSION":
+                signed_qty = qty
+            elif tr.seller == "SUBMISSION":
+                signed_qty = -qty
+            if signed_qty == 0:
+                continue
+
+            edge = (mid - tr.price) * signed_qty
+            adverse = max(0.0, -edge)
+            score = (1 - alpha) * score + alpha * adverse
+            if tr.timestamp > max_seen_ts:
+                max_seen_ts = tr.timestamp
+
+        self.state.toxicity_score[product] = score
+        self.state.last_trade_ts[product] = max_seen_ts
+
+    def _adjust_execution_params(
+        self, product: str, cfg: dict, order_depth: OrderDepth
+    ) -> Tuple[int, int, int]:
+        base_take = int(cfg["take_width"])
+        base_make = int(cfg["make_width"])
+        base_size = int(cfg["order_size"])
+
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        spread = max(1, best_ask - best_bid)
+        bid_vol = max(1, order_depth.buy_orders.get(best_bid, 1))
+        ask_vol = max(1, abs(order_depth.sell_orders.get(best_ask, -1)))
+        top_liquidity = max(1, min(bid_vol, ask_vol))
+
+        take_width = max(base_take, int(round(spread * 0.35)))
+        make_width = max(base_make, int(round(spread * 0.45)))
+
+        size_scale = min(1.0, top_liquidity / max(1.0, base_size * 2.0))
+        min_size = int(cfg.get("min_order_size", 1))
+        order_size = max(min_size, int(round(base_size * size_scale)))
+
+        tox = float(self.state.toxicity_score.get(product, 0.0))
+        tox_threshold = float(cfg.get("toxicity_threshold", 10**9))
+        if tox > tox_threshold:
+            extra = min(int(cfg.get("max_extra_width", 2)), 1 + int((tox - tox_threshold) // max(1.0, tox_threshold)))
+            take_width += extra
+            make_width += extra
+            order_size = max(min_size, order_size - extra)
+
+        return take_width, make_width, order_size
+
+    def _risk_reduce_only_orders(
+        self, product: str, order_depth: OrderDepth, position: int, order_size: int
+    ) -> List[Order]:
+        if position == 0:
+            return []
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        qty = min(abs(position), max(1, order_size * 2))
+        if position > 0:
+            return [Order(product, best_bid, -qty)]
+        return [Order(product, best_ask, qty)]
+
     # ──────────────────────────────────────────────────────────
     # Core order generation: TAKE + MAKE
     # ──────────────────────────────────────────────────────────
@@ -363,13 +525,16 @@ class Trader:
         """
         orders: List[Order] = []
         pos_limit   = cfg["soft_limit"]
-        take_width  = cfg["take_width"]
-        make_width  = cfg["make_width"]
-        order_size  = cfg["order_size"]
+        take_width, make_width, order_size = self._adjust_execution_params(
+            product, cfg, order_depth
+        )
         trend_bias  = cfg.get("trend_bias", 0.0)   # 0=neutral, +ve=buy-biased
 
         best_bid   = max(order_depth.buy_orders.keys())
         best_ask   = min(order_depth.sell_orders.keys())
+
+        if self.state.kill_switch.get(product, False):
+            return self._risk_reduce_only_orders(product, order_depth, position, order_size)
 
         # ── Imbalance-adjusted fair value ─────────────────────
         # If buy pressure is high (imbalance > 0), nudge FV up slightly.
@@ -388,6 +553,19 @@ class Trader:
         # ── Track remaining capacity ──────────────────────────
         remaining_buy  = pos_limit - position        # how much more we can buy
         remaining_sell = pos_limit + position        # how much more we can sell
+        trend_slope = self._trend_slope(product)
+
+        # Pepper-specific short guardrails in uptrend regimes.
+        sell_threshold = adj_fv + take_width
+        allow_passive_sell = True
+        if product == "INTARIAN_PEPPER_ROOT":
+            max_short = int(cfg.get("max_short", pos_limit))
+            remaining_sell = min(remaining_sell, max(0, position + max_short))
+            uptrend_threshold = float(cfg.get("uptrend_slope_threshold", 0.0))
+            if trend_slope > uptrend_threshold:
+                sell_threshold = adj_fv + take_width + 1
+                if cfg.get("disable_passive_sell_in_uptrend", False):
+                    allow_passive_sell = False
 
         # ════════════════════════════════════════════════════
         # PHASE 1: TAKE (market taking — highest priority)
@@ -409,7 +587,6 @@ class Trader:
                 remaining_buy  -= qty
 
         # Take rich bids (someone buying above FV + take_width)
-        sell_threshold = adj_fv + take_width
         for bid_price in sorted(order_depth.buy_orders.keys(), reverse=True):
             if bid_price < sell_threshold:
                 break
@@ -457,7 +634,7 @@ class Trader:
             orders.append(Order(product, our_bid, buy_qty))
 
         # Place passive ask
-        if remaining_sell > 0:
+        if remaining_sell > 0 and allow_passive_sell:
             sell_qty = min(order_size, remaining_sell)
             orders.append(Order(product, our_ask, -sell_qty))
 
@@ -469,12 +646,12 @@ class Trader:
 # (Generated by find_pepper_fv.py on real market data)
 # ═══════════════════════════════════════════════════════════════
 #
-#  Day -2: median=10500, range=[9998, 11003], drift=+500  ⚠️ TRENDING
-#  Day -1: median=11500, range=[10995, 12006], drift=+500 ⚠️ TRENDING
-#  Day  0: median=12500, range=[11994, 13007], drift=+500 ⚠️ TRENDING
+#  Day -2: median=10500, range=[9998, 11003], drift≈+1000  ⚠️ TRENDING
+#  Day -1: median=11500, range=[10995, 12006], drift≈+1000 ⚠️ TRENDING
+#  Day  0: median=12500, range=[11994, 13007], drift≈+1000 ⚠️ TRENDING
 #  Day  1: extrapolated median ≈ 13500 (live round)
 #
-#  CONCLUSION: Pepper is NOT like Emeralds. It trends +500/day.
+#  CONCLUSION: Pepper is NOT like Emeralds. It trends ~+1000/day.
 #  A fixed fair value would lose money (as confirmed by v1 & v3).
 #  EMA with use_ema=True adapts to the trend dynamically.
 #  The seed value PEPPER_FAIR_VALUE=13500 anchors the EMA at

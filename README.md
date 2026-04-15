@@ -48,7 +48,7 @@ Prosperity 4/
 | Product | Character | Strategy |
 |---------|-----------|----------|
 | `ASH_COATED_OSMIUM` | Stable, mean-reverting around 10,000 | Dual-mode: TAKE mispricings + MAKE spread |
-| `INTARIAN_PEPPER_ROOT` | Trending upward +500 XIRECS/day | EMA trend-following with buy-side bias |
+| `INTARIAN_PEPPER_ROOT` | Trending upward ~+1000 XIRECS/day | Adaptive EMA trend-following with buy-side bias + short guardrails |
 
 ---
 
@@ -58,12 +58,12 @@ Running `find_pepper_fv.py` on all three days of historical data revealed:
 
 | Day | Min | Median | Max | Intraday Drift |
 |-----|----:|-------:|----:|---------------:|
-| −2 | 9,998 | 10,500 | 11,003 | **+500** ⚠️ |
-| −1 | 10,995 | 11,500 | 12,006 | **+500** ⚠️ |
-| 0 | 11,994 | 12,500 | 13,007 | **+500** ⚠️ |
-| 1 *(live)* | ~12,994 | **~13,500** | ~14,007 | +500 extrapolated |
+| −2 | 9,998 | 10,500 | 11,003 | **~+1003** ⚠️ |
+| −1 | 10,995 | 11,500 | 12,006 | **~+1000** ⚠️ |
+| 0 | 11,994 | 12,500 | 13,007 | **~+1002** ⚠️ |
+| 1 *(live)* | ~12,994 | **~13,500** | ~14,007 | ~+1000 extrapolated |
 
-Pepper rises exactly **+500 XIRECS every day** in a perfectly linear trend. A fixed fair value (as used in v1–v3) always fights the trend — bots have directional information and trade against us, causing adverse selection losses. The fix is to **track the price with EMA** and hold long.
+Pepper rises roughly **+1000 XIRECS every day** in historical Round 1 data. A fixed fair value (as used in v1–v3) fights the trend and increases adverse-selection risk. The fix is to **track the price with adaptive EMA**, apply long bias, and enforce strict short-side guardrails.
 
 ---
 
@@ -130,7 +130,7 @@ our_ask = max(our_ask, best_bid + 1)   # inside spread
 ### INTARIAN_PEPPER_ROOT — EMA Trend Following
 
 **Fair value:** Dynamic EMA tracking the upward drift.  
-**Seed value:** `13,500` (extrapolated Day 1 start from linear trend).
+**Seed value:** `13,500` (Day 1 extrapolated anchor; adaptive EMA should dominate after warm-up).
 
 **Configuration:**
 ```python
@@ -145,7 +145,7 @@ our_ask = max(our_ask, best_bid + 1)   # inside spread
 ```
 
 **How it earns:**
-- EMA starts at 13,500 and updates every tick: `EMA = 0.10 × mid + 0.90 × EMA`
+- EMA starts near 13,500 and updates every tick: `EMA = 0.10 × mid + 0.90 × EMA`
 - `trend_bias = 0.5` shifts the effective FV up by `0.5 × make_width = 3 points`
   - This makes our bid more aggressive (buys earlier) and our ask more conservative (sells later)
 - The algorithm accumulates Pepper long as price rises → mark-to-market gain
