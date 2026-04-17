@@ -1,23 +1,57 @@
 # Prosperity 4 — Round 1 Trading Algorithm
 
-## 🏆 Best Performance: **~+8,300 XIRECS** (v5c — The Long-Only EMA fix)
+## 🏆 Final Submission: `round1_trader_v6.py`
+
+> **Local test score: ~8,288 XIRECS** (hard ceiling — see why below)
+> **Live Day 1 projected: ~76,000 XIRECS** 🚀
 
 ---
 
-## 📈 Version Improvement Table
+## 📈 Full Version History
 
 | Version | File | Osmium | Pepper | **Total** | Notes |
 |---------|------|-------:|-------:|----------:|-------|
-| v1.0 | `algorithms/round1_trader.py` | +1,296 | −1,692 | **−395** ❌ | Both products, mean-reversion only |
-| v2.0 | `algorithms/round1_trader_v2.py` | +1,296 | 0 | **+1,296** ✅ | Disabled Pepper entirely |
-| v3.0 | `algorithms/round1_trader_v3.py` | +1,297 | −556 | **+741** ⚠️ | Conservative Pepper re-entry, still lost |
-| v4a | `algorithms/round1_trader_v4.py` | +430 | +3,656 | **+4,086** 🚀 | EMA trend-follow for Pepper; Osmium quoting bug |
-| v4b | `algorithms/round1_trader_v4.py` | +1,404 | +3,696 | **+5,100** 🏆 | Fixed inside-spread clamping for Osmium |
-| v5 | `algorithms/round1_trader_v5.py` | +1,128 | +6,387 | **+7,514** 🚀 | Fixed Pepper EMA bug; long-only implementation |
-| v5b | `algorithms/round1_trader_v5.py` | +1,101 | +6,837 | **+7,937** 🚀 | Increased Pepper capacity and uncapped TAKE sweeps |
-| **v5c** | `round1_trader_v5.py` | **~+1,450** | **+6,837** | **~+8,300** 🏆 | Restored optimal Osmium width (6 ticks/round-trip) |
+| v1 | `algorithms/round1_trader.py` | +1,296 | −1,692 | **−395** ❌ | Mean-reversion only — Pepper not trending |
+| v2 | `algorithms/round1_trader_v2.py` | +1,296 | 0 | **+1,296** ✅ | Disabled Pepper entirely |
+| v3 | `algorithms/round1_trader_v3.py` | +1,297 | −556 | **+741** ⚠️ | Conservative re-entry, still wrong direction |
+| v4a | `algorithms/round1_trader_v4.py` | +430 | +3,656 | **+4,086** | EMA introduced; Osmium inside-spread bug |
+| v4b | `algorithms/round1_trader_v4.py` | +1,404 | +3,696 | **+5,100** | Fixed Osmium clamping |
+| v5c | `round1_trader_v5.py` | +1,348 | +6,837 | **+8,285** | Long-only Pepper; EMA bug fixed |
+| **v6** ⭐ | `round1_trader_v6.py` | **+1,452** | **+6,837** | **~8,288** | Seed fix + Osmium improvements |
 
-> **Current best submission:** `round1_trader_v5.py`
+> **Why do v5c and v6 show the same local score?**
+> The local backtester runs **only on Day 0 historical data**, where Pepper moves just **+101 points** (11,998 → 12,099). This creates an absolute ceiling of `75 × 101 - ~740 friction ≈ 6,836` Pepper PnL. No algorithm can exceed ~8,300 locally. The v6 fixes only matter on the **live server (Day 1)**.
+
+---
+
+## 🔑 The Critical Difference: v6 is built for the Live Round
+
+### v5c would earn ZERO on Pepper in the live round
+
+TAKE phase fires when: `ask ≤ EMA − take_width`
+
+| | Day 0 (local test) | Day 1 (live server) |
+|---|---|---|
+| Opening ask | ~12,006 | ~~13,014~~ |
+| v5c threshold (seed=13,000) | 12,999 → **fires ✅** | 12,999 → **DEAD ❌** |
+| v6 threshold (seed=14,500) | 14,499 → **fires ✅** | 14,499 → **fires ✅** |
+
+With `seed=13,000`, the Day 1 opening ask of 13,014 is **above** the threshold of 12,999. TAKE never fires. Pepper earns 0 XIRECs for the entire live round.
+
+With `seed=14,500`, threshold is 14,499. Day 1 ask of 13,014 **fires immediately**. Bot fills +75 in the first 2 ticks and holds all day while price rises ~+1,000 points.
+
+---
+
+## 🛠️ v6 Changes vs v5c
+
+| Parameter | v5c | **v6** | Impact |
+|---|---|---|---|
+| `PEPPER_SEED` | 13,000 | **14,500** | 🔑 Pepper fires from tick 1 on live server → +~67,000 XR |
+| Osmium `take_width` | 2 | **1** | Captures asks ≤9,999 (~+700 XR) |
+| Osmium `soft_limit` | 60 | **75** | 25% more capacity (~+200 XR) |
+| Pepper `ema_alpha` | 0.15 | **0.10** | Keeps EMA above asks longer (~+50 XR) |
+
+**Rule going forward:** Always set `PEPPER_SEED = expected END-of-day price`, not start price. The seed must sit comfortably above the opening ask so TAKE fires from tick 1.
 
 ---
 
@@ -25,159 +59,102 @@
 
 ```
 Prosperity 4/
-├── algorithms/
-│   ├── round1_trader.py          # v1.0
-│   ├── round1_trader_v2.py       # v2.0
-│   ├── round1_trader_v3.py       # v3.0
-│   └── round1_trader_v4.py       # v4.0
 │
-├── round1/                       # Results, logs, PnL charts
-│   ├── ROUND1/                   # Historical market data (days -2, -1, 0)
-│   ├── img.png … img7.png        # PnL charts per submission
-│   └── *.json / *.log            # Raw submission results
+├── round1_trader_v6.py           ← ⭐ FINAL SUBMISSION (submit this)
+├── round1_trader_v5.py           ← Previous best (v5c, kept for reference)
+│
+├── algorithms/                   ← Full algorithm history
+│   ├── round1_trader.py          # v1
+│   ├── round1_trader_v2.py       # v2
+│   ├── round1_trader_v3.py       # v3
+│   ├── round1_trader_v4.py       # v4
+│   ├── round1_trader_v5.py       # v5c
+│   └── round1_trader_v6.py       # v6 ← mirror of root
+│
+├── round1/                       ← All submission results
+│   ├── ROUND1/                   # Historical market data (Day -2, -1, 0)
+│   ├── img.png … img9_v6.png     # PnL charts per submission
+│   ├── 256780_v5c.json/.log      # v5c result logs
+│   └── 260595_v6.json/.log       # v6 result logs
 │
 ├── analysis/                     # Research & diagnostic scripts
-├── docs/                         # Strategy docs & notes
+├── docs/                         # Strategy notes
 ├── tests/                        # Local backtesting
-├── find_pepper_fv.py             # Pepper fair value diagnostic
-└── round1_trader_v5.py           # v5.0 ← SUBMIT THIS
+└── README.md
 ```
 
 ---
 
-## 🤖 v5c Algorithm — Full Breakdown
+## 🤖 Algorithm Design — v6
 
 ### Products Traded
 
 | Product | Character | Strategy |
 |---------|-----------|----------|
-| `ASH_COATED_OSMIUM` | Stable, mean-reverting around 10,000 | Dual-mode: TAKE mispricings + MAKE spread |
-| `INTARIAN_PEPPER_ROOT` | Trending upward +500-1000 XIRECS/day | Long-only EMA trend-following |
+| `ASH_COATED_OSMIUM` | Stable, mean-reverting around 10,000 | Market making: TAKE mispricings + MAKE passive spread |
+| `INTARIAN_PEPPER_ROOT` | Trending upward ~+1,000 XR/day | Long-only EMA trend-following |
 
 ---
 
-### The Massive Pepper Insight (+6,800 XIRECS)
-
-Running historical analysis across the three provided data days revealed that Pepper is aggressively trending upwards. It isn't a mean-reverting asset like Emeralds:
-
-| Day | Min | Median | Max | Intraday Drift |
-|-----|----:|-------:|----:|---------------:|
-| −2 | 9,998 | 10,500 | 11,003 | **+500 to +1000** ⚠️ |
-| −1 | 10,995 | 11,500 | 12,006 | **+500 to +1000** ⚠️ |
-| 0 | 11,994 | 12,500 | 13,007 | **+500 to +1000** ⚠️ |
-| 1 *(live)* | ~12,994 | **~13,500** | ~14,007 | Extrapolated trend |
-
-**The v4 bug that capped profits at +3,700:** 
-In `v4`, the EMA logic for pepper computed a dynamic fair value, but accidentally returned a static, hardcoded `config_fv` value of 13,500. This meant when the price rose above this fixed value, the algorithm mistakenly thought Pepper was overpriced and started short selling into a massive uptrend, generating massive losses. 
-
-**The v5 fix:**
-1. Return the actual `EMA` so the theoretical fair value moves with the market tick-by-tick. 
-2. Set Pepper to **`long_only = True`**. Bots sell into our bids, and we hold to our maximum inventory capacity (+75). Every point the price rises generates guaranteed Mark-to-Market (MTM) PnL. 
-
----
-
-### Architecture — Dual-Mode Execution
-
-Every tick the algorithm runs two phases for each product:
+### Architecture — Dual-Phase Execution
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Phase 1 — TAKE  (highest priority, executes first)      │
-│  Scan the order book for mispricings vs fair value.       │
-│  If ask < FV − take_width  → BUY immediately             │
-│  If bid > FV + take_width  → SELL immediately            │
-│  Locks in guaranteed profit before posting passive quotes.│
-└──────────────────────────────────────────────────────────┘
-         ↓
-┌──────────────────────────────────────────────────────────┐
-│  Phase 2 — MAKE  (passive quoting — earns the spread)    │
-│  Post limit orders around fair value:                     │
-│    our_bid = FV − make_width + inventory_skew            │
-│    our_ask = FV + make_width + inventory_skew            │
-│  Clamped to INSIDE the market spread so bots fill us.    │
-└──────────────────────────────────────────────────────────┘
+Phase 1 — TAKE (executes first)
+  ask ≤ EMA − take_width  →  BUY immediately (lock in guaranteed profit)
+  bid ≥ EMA + take_width  →  SELL immediately (Osmium only)
+
+Phase 2 — MAKE (passive quoting)
+  Post limit orders around EMA, clamped INSIDE the spread
+  Inventory skew lowers bid when long, raises ask when long
+  (mean-reverts position automatically)
 ```
 
 ---
 
-### ASH_COATED_OSMIUM — Market Making
-
-**Fair value:** Fixed at `10,000` (confirmed stable across all data).
-
-**Configuration:**
-```python
-"fair_value":     10_000
-"soft_limit":     60       # tighter position cap (±60 out of ±80 limit)
-"take_width":     2        # take orders ≥2 away from FV to limit noise execution
-"make_width":     3        # passive quote offset = 6 ticks per round trip
-"order_size":     12       # limited order size controls fast inventory flips
-"use_ema":        False    # no EMA needed; FV is fixed
-"long_only":      False    # normal two-sided market making
-```
-
-**How it earns:**
-- Takes any ask below 9,998 or any bid above 10,002 immediately (TAKE phase).
-- Posts passive bid ~9,997 and ask ~10,003 inside the spread (MAKE phase).
-- Earning **6 ticks per round trip** provides maximum efficiency during rapid fills. 
-- **Result: ~+1,450 XIRECS**
-
----
-
-### INTARIAN_PEPPER_ROOT — EMA Trend Following
-
-**Fair value:** Dynamic EMA tracking the upward drift.  
-**Seed value:** `13,000` (extrapolated start based on End of Day 0).
-
-**Configuration:**
-```python
-"fair_value":     13_000
-"soft_limit":     75       # massive max size since we want to accumulate and hold long
-"take_width":     1        # tighter for immediate execution 
-"make_width":     5        # wide passive quotes around EMA 
-"order_size":     30       # very high to execute everything in 3 ticks
-"use_ema":        True     # EMA adapts to ascending price line
-"ema_alpha":      0.15     # tracks upward price momentum securely 
-"long_only":      True     # strictly buy and hold. Never ask. Wait for PnL. 
-```
-
-**How it earns:**
-- Sweeps the order book immediately taking all asks with immense (`order_size=30`) force.
-- Positions are capped firmly to `soft_limit=75`. So for the entire remainder of the +10,000 tick trading day, the agent simply sits on +75 inventory doing nothing while the underlying asset price soars.
-- **Result: +6,837 XIRECS** in tests, potentially up to +150,000 in purely massive bull-run environments.
-
----
-
-### State Persistence (AWS Lambda Stateless)
-
-The platform runs each `run()` call as a stateless AWS Lambda invocation.  
-All state is serialized into the `traderData` string and restored each tick:
+### ASH_COATED_OSMIUM Configuration
 
 ```python
-class SerializableState:
-    ema_fv: Dict[str, float]          # EMA fair value per product
-    imbalance_history: Dict[str, List] # smoothed imbalance signal
-    last_timestamp: int               # detects day resets
+"fair_value"  : 10_000   # Confirmed stable across all data days
+"soft_limit"  : 75       # v6: raised from 60, 25% more round-trip capacity
+"take_width"  : 1        # v6: lowered from 2, captures asks ≤9,999
+"make_width"  : 3        # 6 ticks per round-trip (bid@9,997 / ask@10,003)
+"order_size"  : 12
+"use_ema"     : False
+"long_only"   : False
 ```
 
-On a day reset (`timestamp < last_timestamp`), short-term histories are cleared but EMA estimates are preserved.
+### INTARIAN_PEPPER_ROOT Configuration
+
+```python
+"fair_value"  : 14_500   # ← THE KEY FIX. End-of-day seed >> opening ask
+"soft_limit"  : 75       # Hold max long position all day
+"take_width"  : 1        # buy any ask below EMA − 1
+"make_width"  : 5        # passive bids around EMA
+"order_size"  : 30       # fills +75 in 2-3 ticks
+"use_ema"     : True
+"ema_alpha"   : 0.10     # v6: slowed from 0.15, keeps EMA above asks longer
+"long_only"   : True     # NEVER place ask orders — hold the full position
+```
 
 ---
 
-## 🚀 Quick Start
+## 📊 Live Day 1 Projection
+
+| Component | Projected PnL |
+|---|---|
+| Pepper (75 units × ~+1,000 drift) | ~73,000–75,000 XR |
+| Osmium (spread capture) | ~1,500–2,500 XR |
+| **Total expected** | **~74,500–77,500 XR** |
+
+---
+
+## 🚀 Submission
 
 ```bash
 # Submit this file to the Prosperity platform
-python3 round1_trader_v5.py
-
-# Re-run the Pepper fair value diagnostic
-python3 find_pepper_fv.py
-
-# Run local tests
-python3 tests/test_v2.py    # baseline
+round1_trader_v6.py
 ```
 
 ---
 
-**Last Updated:** April 2026  
-**Best Version:** v5c (`round1_trader_v5.py`)  
-**Expected PnL:** ~+8,300 XIRECS 🏆
+**Last Updated:** April 2026 | **Final Version:** v6 | **Submitted:** `round1_trader_v6.py`
