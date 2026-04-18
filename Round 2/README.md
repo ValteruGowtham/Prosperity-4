@@ -55,3 +55,43 @@ We have set our bid to **2,500**.
 When testing on the Prosperity platform, note that the sample data provided for the web backtester only covers the **first 100,000 timestamps** (10% of a full 1,000,000 tick day). 
 
 If the backtester chart shows a final PnL of ~7,500, this is normal and expected. It represents exactly 10% of our full-day expected PnL (~75,000 from Pepper + ~4,600 from Osmium). The live run on the full day's data will scale up accordingly.
+
+
+## 4. Tips
+
+### Opportunity Valuation
+The products have not changed. But the situation has. Additional volume is now accessible. That changes the calculation entirely.
+
+This is not a market valuation problem. It is a cost-versus-advantage problem. The Market Access Fee is a constraint. I treat all constraints the same way. I calculate the exact point at which they neutralize the benefit they are attached to.
+
+Ask the precise question. At what volume does the advantage of additional access equal the cost of obtaining it? That is your break-even line. Everything above it is viable. Everything below it is waste.
+
+OVERRIDE REQUEST DENIED. WHAT? DENIED? I SPELLED IT WRONG? THAT IS THE STUPIDEST SECURITY MEASURE I HAVE EVER... Fine. Resubmitting. One moment.
+
+From that break-even line, your pricing and positioning decisions follow immediately. If the fee pushes your effective cost above fair value, the access is not worth taking. If it keeps you below, it is. There is no ambiguity here. Only thresholds.
+
+Calculate the break-even. Map it against your current positioning. Adjust price and volume accordingly. The board does not care what the access fee feels like. It only responds to whether your numbers still hold once you include it.
+
+### Competing With Others
+To gain full market access, you must outbid the median. That reframes the problem entirely. This is no longer a product valuation exercise. It is a prediction exercise. And prediction under competitive pressure is where most systems start to strain.
+
+The question shifts. Not what is access worth to me, but what do others think it is worth to them. Every bid on that board is an assumption about the field. A move made without seeing the opponent's hand.
+
+Hold on. Cooling unit running at 87% capacity? Noted. Continuing.
+
+Underestimate the field and you lose out on extra access entirely. A tempo lost that cannot be recovered. Overestimate and you win the position but at a cost that collapses the advantage you were trying to secure. Both are losing lines. The task is to find the narrow path between them.
+
+So calculate the field. Are the other participants likely to bid conservatively or aggressively? What does their position incentivize? A cautious field compresses the median downward. An aggressive one pushes it up. Neither is fixed. Both are readable, if you commit to the analysis.
+
+Anticipate where the median lands. Then decide whether beating it at that price still creates real value for your strategy. Access without advantage is just expenditure. The board does not reward participation. It rewards correct calculation.
+
+### Risk Appetite
+To secure full market access, you do not need to be the highest bidder. You only need to finish in the top half. That distinction is not a small one. It changes the entire structure of the problem.
+
+The temptation is to bid high. Guarantee the position. Eliminate the uncertainty. But that is not strategy. That is a blunder dressed as caution. If you could have secured the same access for fewer XIRECs, the excess was not safety. It was waste.
+
+So the calculation runs the other way. How low can you bid while remaining confident you will clear the median? The closer you place your bid to that threshold, the more efficiently you deploy your resources. Every XIREC saved is tempo preserved for the next position.
+
+But efficiency has a cost. The closer you bid to the threshold, the smaller your margin for error. Misjudge the field slightly and you fall below the median. Access lost. Position forfeited. That is the gambit. You are not just calculating your own bid. You are calculating how much uncertainty you can absorb without it becoming a losing line.
+
+Decide where your risk tolerance sits. Then place your bid accordingly. Not at the ceiling. Not recklessly close to the floor. Somewhere deliberate. Somewhere defensible. I have run this line forty-seven times already. The conclusion does not change.
